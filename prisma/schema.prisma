@@ -1,0 +1,1955 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Municipio {
+  id                      String                      @id @default(uuid())
+  nome                    String                      @unique
+  codigo                  String                      @unique
+  provincia               String?
+  activo                  Boolean                     @default(true)
+  criadoEm                DateTime                    @default(now())
+  alteradoEm              DateTime                    @updatedAt
+  agendamentos            Agendamento[]
+  contactosInstitucionais ContactoInstitucional[]
+  conteudosPublicos       ConteudoPublico[]
+  direcoes                Direcao[]
+  intercambiosRecebidos   Intercambio[]
+  pagamentos              Pagamento[]
+  pedidosValidacao        PedidoValidacaoIdentidade[]
+  processosGenericos      ProcessoGenerico[]
+  utilizadores            Utilizador[]
+  ocorrencias             Ocorrencia[]
+  receitas                Receita[]
+  servicos                Servico[]
+
+  @@map("municipios")
+}
+
+enum TipoCentro {
+  ACOLHIMENTO_INFANTIL
+  ACOLHIMENTO_IDOSOS
+  COZINHA_SOCIAL
+  MISTO
+  OUTRO
+}
+
+enum EstadoCentro {
+  ATIVO
+  INATIVO
+  EM_MANUTENCAO
+}
+
+enum NivelRiscoZona {
+  BAIXO
+  MEDIO
+  ALTO
+}
+
+// TipoCasoSensivel, EstadoCasoSensivel, AcaoAuditoriaCaso e os models
+// CasoSensivel/AcessoCasoSensivel foram MOVIDOS para
+// casos-sensiveis/prisma-caso-sensivel.prisma (versão com campos
+// cifrados e soft delete) — não os dupliquem aqui.
+
+enum TipoPedidoApoio {
+  MICROCREDITO
+  HABITACAO
+  APOIO_IDOSO
+  CESTA_BASICA
+  OUTRO
+}
+
+enum EstadoPedidoApoio {
+  EM_ANALISE
+  DEFERIDO
+  INDEFERIDO
+  CANCELADO
+}
+
+enum TipoPrograma {
+  EMPODERAMENTO_GENERO
+  MICROCREDITO_COLETIVO
+  OUTRO
+}
+
+enum EstadoPrograma {
+  ATIVO
+  CONCLUIDO
+  CANCELADO
+}
+
+/// Cadastro e gestão operacional de cada centro (acolhimento, cozinha social).
+model CentroAcolhimento {
+  id             String  @id @default(uuid())
+  municipioId    String
+  departamentoId String
+  departamento   Direcao @relation(fields: [departamentoId], references: [id])
+
+  nome      String
+  tipo      TipoCentro
+  bairro    String
+  endereco  String?
+  latitude  Float?
+  longitude Float?
+
+  capacidadeMaxima Int?
+  ocupacaoAtual    Int  @default(0)
+
+  responsavelNome     String?
+  responsavelContacto String?
+
+  estado      EstadoCentro @default(ATIVO)
+  observacoes String?
+
+  criadoEm   DateTime @default(now())
+  alteradoEm DateTime @updatedAt
+
+  distribuicoes DistribuicaoKit[]
+
+  @@index([municipioId, estado])
+  @@index([municipioId, tipo])
+  @@map("centros_acolhimento")
+}
+
+model ZonaSensivel {
+  id          String         @id @default(uuid())
+  municipioId String
+  bairro      String
+  nivelRisco  NivelRiscoZona
+  latitude    Float?
+  longitude   Float?
+  descricao   String?
+  criadoEm    DateTime       @default(now())
+  alteradoEm  DateTime       @updatedAt
+
+  beneficiarios Beneficiario[]
+
+  @@index([municipioId, nivelRisco])
+  @@map("zonas_sensiveis")
+}
+
+/// Registo central de pessoas/famílias vulneráveis. Não-restrito — é o
+/// cadastro geral. Os CASOS SENSÍVEIS (violência/abuso) são um modelo à
+/// parte, com acesso e auditoria próprios (ver CasoSensivel).
+model Beneficiario {
+  id          String @id @default(uuid())
+  municipioId String
+
+  nome                  String
+  bairro                String
+  contacto              String?
+  numeroMembrosAgregado Int? // dimensão do agregado familiar, se aplicável
+
+  zonaSensivelId String?
+  zonaSensivel   ZonaSensivel? @relation(fields: [zonaSensivelId], references: [id])
+
+  criancasSemRegistoCivil Int @default(0)
+
+  ativo       Boolean @default(true)
+  observacoes String?
+
+  criadoEm   DateTime @default(now())
+  alteradoEm DateTime @updatedAt
+
+  pedidosApoio   PedidoApoio[]
+  distribuicoes  DistribuicaoKit[]
+  casosSensiveis CasoSensivel[]
+  participacoes  ParticipanteProgramas[]
+
+  @@index([municipioId, bairro])
+  @@index([municipioId, zonaSensivelId])
+  @@map("beneficiarios")
+}
+
+enum TipoCasoSensivel {
+  VIOLENCIA_ABUSO
+  SEM_REGISTO_CIVIL
+  OUTRO
+}
+
+enum EstadoCasoSensivel {
+  ABERTO
+  EM_ACOMPANHAMENTO
+  ENCAMINHADO
+  ENCERRADO
+}
+
+enum AcaoAuditoriaCaso {
+  VISUALIZACAO
+  CRIACAO
+  EDICAO
+  ELIMINACAO
+  RESTAURACAO
+}
+
+/// ACESSO RESTRITO E CIFRADO. Casos de crianças em violência/abuso, ou
+/// sem registo civil com acompanhamento activo.
+model CasoSensivel {
+  id          String @id @default(uuid())
+  municipioId String
+
+  beneficiarioId String?
+  beneficiario   Beneficiario? @relation(fields: [beneficiarioId], references: [id])
+
+  tipo                   TipoCasoSensivel
+  descricaoCifrada       String             @db.Text // AES-256-GCM — nunca texto simples
+  encaminhadoParaCifrado String?            @db.Text // idem; ex.: "Câmara de Menores", "Hospital"
+  estado                 EstadoCasoSensivel @default(ABERTO)
+  dataDeteccao           DateTime
+
+  registadoPorId String // FK solta para Utilizador — sem @relation, ver nota acima
+
+  // --- Soft delete ---
+  eliminadoEm      DateTime?
+  eliminadoPorId   String?
+  motivoEliminacao String?
+
+  criadoEm   DateTime @default(now())
+  alteradoEm DateTime @updatedAt
+
+  acessos AcessoCasoSensivel[]
+
+  @@index([municipioId, estado])
+  @@index([municipioId, tipo])
+  @@index([municipioId, eliminadoEm])
+  @@map("casos_sensiveis")
+}
+
+/// Registo de auditoria imutável — nunca se actualiza nem apaga uma linha,
+/// só se inserem novas. Cobre visualizações, criação, edição, eliminação
+/// (soft) e restauro.
+model AcessoCasoSensivel {
+  id             String            @id @default(uuid())
+  casoSensivelId String
+  casoSensivel   CasoSensivel      @relation(fields: [casoSensivelId], references: [id])
+  utilizadorId   String // FK solta para Utilizador — sem @relation
+  acao           AcaoAuditoriaCaso
+  criadoEm       DateTime          @default(now())
+
+  @@index([casoSensivelId, criadoEm])
+  @@index([utilizadorId, criadoEm])
+  @@map("acessos_casos_sensiveis")
+}
+
+model PedidoApoio {
+  id          String @id @default(uuid())
+  municipioId String
+
+  beneficiarioId String
+  beneficiario   Beneficiario @relation(fields: [beneficiarioId], references: [id])
+
+  tipo   TipoPedidoApoio
+  estado EstadoPedidoApoio @default(EM_ANALISE)
+
+  valorAprovado       Decimal? @db.Decimal(12, 2) // ex.: montante de microcrédito
+  motivoIndeferimento String?
+  observacoes         String?
+
+  resolvidoPorId String?
+  resolvidoPor   Utilizador? @relation("PedidoApoioResolvidoPor", fields: [resolvidoPorId], references: [id])
+
+  criadoEm    DateTime  @default(now())
+  resolvidoEm DateTime?
+
+  @@index([municipioId, estado])
+  @@index([municipioId, tipo])
+  @@index([municipioId, beneficiarioId])
+  @@map("pedidos_apoio")
+}
+
+/// Registo de distribuição de kits de cesta básica. `requisicaoId` é uma
+/// ligação leve (opcional) ao módulo de Logística — ver TODO no README
+/// de integração sobre como apertar isto ao vosso modelo real de stock.
+model DistribuicaoKit {
+  id          String @id @default(uuid())
+  municipioId String
+
+  beneficiarioId String
+  beneficiario   Beneficiario @relation(fields: [beneficiarioId], references: [id])
+
+  centroAcolhimentoId String?
+  centroAcolhimento   CentroAcolhimento? @relation(fields: [centroAcolhimentoId], references: [id])
+
+  quantidadeKits   Int        @default(1)
+  requisicaoId     String? // TODO: ligar ao model Requisicao real da Logística
+  distribuidoPorId String
+  distribuidoPor   Utilizador @relation("DistribuicaoKitRealizadoPor", fields: [distribuidoPorId], references: [id])
+  observacoes      String?
+
+  criadoEm DateTime @default(now())
+
+  @@index([municipioId, criadoEm])
+  @@index([municipioId, beneficiarioId])
+  @@map("distribuicoes_kits")
+}
+
+model ProgramaSocial {
+  id          String @id @default(uuid())
+  municipioId String
+
+  nome       String
+  tipo       TipoPrograma
+  descricao  String?
+  dataInicio DateTime
+  dataFim    DateTime?
+  estado     EstadoPrograma @default(ATIVO)
+
+  criadoEm   DateTime @default(now())
+  alteradoEm DateTime @updatedAt
+
+  participantes ParticipanteProgramas[]
+
+  @@index([municipioId, estado])
+  @@index([municipioId, tipo])
+  @@map("programas_sociais")
+}
+
+model ParticipanteProgramas {
+  id             String         @id @default(uuid())
+  programaId     String
+  programa       ProgramaSocial @relation(fields: [programaId], references: [id])
+  beneficiarioId String
+  beneficiario   Beneficiario   @relation(fields: [beneficiarioId], references: [id])
+  dataInscricao  DateTime       @default(now())
+  observacoes    String?
+
+  @@unique([programaId, beneficiarioId])
+  @@map("participantes_programas")
+}
+
+enum BemCategoria {
+  MOVEIS
+  IMOVEL_DOMINIO_PUBLICO
+  IMOVEL_DOMINIO_PRIVADO
+  INTANGIVEIS
+  VEICULO
+}
+
+enum BemEstado {
+  OPERACIONAL
+  TRANSFERIDO
+  ABATIDO
+  MAU
+  OBSOLETO
+  AVARIADO
+}
+
+enum SituacaoJuridica {
+  REGULAR
+  IRREGULAR
+  EM_REGULARIZACAO
+}
+
+enum EstadoOcupacao {
+  LIVRE
+  OCUPADO
+  OCUPADO_ILEGALMENTE
+}
+
+enum BemMovimentoTipo {
+  AQUISICAO
+  TRANSFERENCIA
+  ABATIMENTO
+  MANUTENCAO
+}
+
+enum BemHistoricoTipo {
+  CRIACAO
+  EDICAO
+  TRANSFERENCIA
+  MANUTENCAO
+  ABATIMENTO
+  REGULARIZACAO_JURIDICA
+}
+
+model Bem {
+  id          String       @id @default(uuid())
+  municipioId String
+  categoria   BemCategoria
+
+  // Campos comuns
+  designacao    String
+  localizacao   String
+  estado        BemEstado @default(OPERACIONAL)
+  tempoVidaUtil Int? // anos
+  dataAquisicao DateTime?
+  criadoPorId   String
+  alteradoPorId String?
+  criadoEm      DateTime  @default(now())
+  alteradoEm    DateTime  @updatedAt
+  direcaoId     String?
+
+  direcao Direcao? @relation(fields: [direcaoId], references: [id])
+
+  marca      String?
+  modelo     String?
+  cor        String?
+  observacao String? @db.Text
+
+  // Imóveis (terrenos/edifícios)
+  extensao             Float? // metros
+  largura              Float? // metros
+  areaImplantada       Float? // m²
+  areaConstruida       Float? // m²
+  numeroCompartimentos Int?
+  areaInstalada        Float? // m²
+  piso                 String?
+
+  // Veículos específicos
+  chassi          String?
+  numeroMatricula String?
+  numeroLugares   Int?
+  tipoCombustivel String?
+
+  // Intangíveis
+  ticketMarca        String?
+  logotipoUrl        String?
+  numeroRegistoMarca String?
+
+  fachadas               BemFachada[]
+  imagens                BemImagem[]
+  historico              BemHistorico[]
+  movimentos             BemMovimento[]
+  manutencoesProgramadas ManutencaoProgramada[] // ← ADICIONAR no final do model Bem
+  regularizacaoJuridica  BemRegularizacaoJuridica?
+  frotaOperacional       FrotaOperacional?
+
+  @@index([municipioId])
+  @@index([categoria])
+  @@index([estado])
+  @@index([direcaoId])
+}
+
+model BemFachada {
+  id        String  @id @default(uuid())
+  bemId     String
+  bem       Bem     @relation(fields: [bemId], references: [id], onDelete: Cascade)
+  direcao   String // NORTE, SUL, SUDOESTE, LESTE
+  imagemUrl String?
+  descricao String?
+
+  @@unique([bemId, direcao])
+}
+
+model BemImagem {
+  id       String   @id @default(uuid())
+  bemId    String
+  bem      Bem      @relation(fields: [bemId], references: [id], onDelete: Cascade)
+  url      String
+  legenda  String?
+  criadoEm DateTime @default(now())
+}
+
+model BemHistorico {
+  id              String           @id @default(uuid())
+  bemId           String
+  bem             Bem              @relation(fields: [bemId], references: [id], onDelete: Cascade)
+  tipo            BemHistoricoTipo
+  descricao       String
+  utilizadorId    String
+  data            DateTime         @default(now())
+  dadosAnteriores Json? // snapshot parcial antes da alteração
+}
+
+model BemMovimento {
+  id               String           @id @default(uuid())
+  bemId            String
+  bem              Bem              @relation(fields: [bemId], references: [id], onDelete: Cascade)
+  tipo             BemMovimentoTipo
+  descricao        String
+  direcaoOrigemId  String?
+  direcaoDestinoId String?
+  utilizadorId     String
+  data             DateTime         @default(now())
+  valor            Float?
+  observacao       String?
+}
+
+model BemRegularizacaoJuridica {
+  id    String @id @default(uuid())
+  bemId String @unique
+  bem   Bem    @relation(fields: [bemId], references: [id], onDelete: Cascade)
+
+  situacaoJuridica     SituacaoJuridica @default(IRREGULAR)
+  estadoOcupacao       EstadoOcupacao   @default(LIVRE)
+  historicoDocumental  String?          @db.Text
+  alertaIrregularidade Boolean          @default(false)
+
+  processos Json?
+
+  criadoEm   DateTime @default(now())
+  alteradoEm DateTime @updatedAt
+}
+
+enum TipoMovimentoStock {
+  ENTRADA
+  SAIDA
+  AJUSTE
+}
+
+enum TipoServicoContinuo {
+  ENERGIA
+  INTERNET
+  VOZ
+  TELEVISAO
+}
+
+enum EstadoServicoContinuo {
+  ACTIVO
+  SUSPENSO
+  CANCELADO
+}
+
+model ItemStock {
+  id                       String    @id @default(uuid())
+  municipioId              String
+  codigo                   String
+  designacao               String
+  categoria                String // "BEM_CONSUMO", "MATERIAL_ESCRITORIO", "LIMPEZA", etc.
+  unidadeMedida            String
+  quantidadeActual         Int       @default(0)
+  quantidadeMinima         Int       @default(0)
+  pontoReposicao           Int       @default(0)
+  cicloReposicaoMeses      Int?
+  fornecedorPadrao         String?
+  ultimoAlertaEnviadoEm    DateTime?
+  ultimoNivelAlertaEnviado String?
+  criadoEm                 DateTime  @default(now())
+  alteradoEm               DateTime  @updatedAt
+
+  movimentos MovimentoStock[]
+
+  @@unique([municipioId, codigo])
+  @@index([municipioId])
+  @@index([quantidadeActual])
+  @@map("itens_stock")
+}
+
+model MovimentoStock {
+  id                  String             @id @default(uuid())
+  itemStockId         String
+  tipo                TipoMovimentoStock
+  quantidade          Int
+  quantidadeAnterior  Int
+  quantidadePosterior Int
+  motivo              String
+  documentoRef        String?
+  utilizadorId        String
+  criadoEm            DateTime           @default(now())
+
+  itemStock ItemStock @relation(fields: [itemStockId], references: [id], onDelete: Cascade)
+
+  @@index([itemStockId])
+  @@index([criadoEm])
+  @@map("movimentos_stock")
+}
+
+model ServicoContinuo {
+  id             String                @id @default(uuid())
+  municipioId    String
+  tipo           TipoServicoContinuo
+  designacao     String
+  fornecedor     String?
+  numeroContrato String?
+  estado         EstadoServicoContinuo @default(ACTIVO)
+
+  dataUltimoCarregamento   DateTime?
+  valorUltimoCarregamento  Decimal?  @db.Decimal(12, 2)
+  consumoEstimadoDias      Int?
+  dataPrevistaEsgotamento  DateTime?
+  dataProximoCarregamento  DateTime?
+  alertaDiasAntes          Int       @default(7)
+  ultimoAlertaEnviadoEm    DateTime?
+  ultimoNivelAlertaEnviado String?
+
+  criadoEm   DateTime @default(now())
+  alteradoEm DateTime @updatedAt
+
+  @@index([municipioId])
+  @@index([tipo])
+  @@index([estado])
+  @@index([dataPrevistaEsgotamento])
+  @@map("servicos_continuos")
+}
+
+model ManutencaoProgramada {
+  id                       String    @id @default(uuid())
+  municipioId              String
+  bemId                    String
+  bem                      Bem       @relation(fields: [bemId], references: [id]) // ← ADICIONAR
+  tipoManutencao           String
+  periodicidadeMeses       Int
+  dataUltima               DateTime?
+  dataProxima              DateTime?
+  especificacoesTecnicas   String?   @db.Text
+  responsavelId            String?
+  estado                   String    @default("AGENDADA")
+  observacoes              String?
+  ultimoAlertaEnviadoEm    DateTime?
+  ultimoNivelAlertaEnviado String?
+  criadoEm                 DateTime  @default(now())
+  alteradoEm               DateTime  @updatedAt
+
+  @@index([municipioId])
+  @@index([bemId])
+  @@index([dataProxima])
+  @@index([estado])
+  @@map("manutencoes_programadas")
+}
+
+model FrotaOperacional {
+  id                  String    @id @default(uuid())
+  municipioId         String
+  bemId               String    @unique
+  bem                 Bem       @relation(fields: [bemId], references: [id]) // ← ADICIONAR
+  alocacaoActual      String?
+  kmActual            Int       @default(0)
+  dataUltimaRevisao   DateTime?
+  kmProximaRevisao    Int?
+  dataProximaRevisao  DateTime?
+  consumoMedio        Decimal?  @db.Decimal(5, 2)
+  ultimoAbastecimento DateTime?
+  tipoCombustivel     String?
+  criadoEm            DateTime  @default(now())
+  alteradoEm          DateTime  @updatedAt
+
+  @@index([municipioId])
+  @@index([alocacaoActual])
+  @@map("frota_operacional")
+}
+
+model Direcao {
+  id                               String                  @id @default(uuid())
+  municipioId                      String
+  nome                             String
+  sigla                            String
+  descricao                        String?
+  tipo                             TipoOrgao               @default(DIRECCAO_EXECUTIVA_DESCONCENTRADA)
+  areaResponsabilidade             AreaResponsabilidade?
+  responsavel                      String?
+  contacto                         String?
+  permiteIntercambioInterMunicipal Boolean                 @default(false)
+  criadoEm                         DateTime                @default(now())
+  alteradoEm                       DateTime                @updatedAt
+  contactosInstitucionais          ContactoInstitucional[]
+  departamentos                    Departamento[]
+  municipio                        Municipio               @relation(fields: [municipioId], references: [id])
+  documentos                       Documento[]
+  pastas                           Pasta[]
+  intercambiosEnviados             Intercambio[]
+  processosGenericosAtual          ProcessoGenerico[]      @relation("ProcessosGenericosAtual")
+  processosGenericosDespachada     ProcessoGenerico[]      @relation("ProcessosGenericosDespachada")
+  processosGenericosOrigem         ProcessoGenerico[]      @relation("ProcessosGenericosOrigem")
+  utilizadores                     Utilizador[]
+  requisicoesLogistica             RequisicaoLogistica[]
+  bems                             Bem[]
+  centrosAcolhimento               CentroAcolhimento[]
+  funcionarios                     Funcionario[]
+  receitas                         Receita[]
+  servicos                         Servico[]
+
+  @@unique([municipioId, sigla])
+  @@unique([municipioId, nome])
+  @@index([tipo])
+  @@map("direcoes")
+}
+
+enum RequisicaoCategoria {
+  BEM
+  SERVICO
+  EMPREITADA
+}
+
+enum RequisicaoEstado {
+  RASCUNHO
+  SUBMETIDA
+  APROVADA
+  REJEITADA
+  EM_EXECUCAO
+  CONCLUIDA
+}
+
+enum TipoServico {
+  REPARACAO
+  MONTAGEM
+  MELHORIA
+  MANUTENCAO
+  CONSTRUCAO_SOFTWARE
+}
+
+enum EstadoObra {
+  NAO_INICIADA
+  EM_CURSO
+  PARADA
+  CONCLUIDA
+}
+
+model RequisicaoLogistica {
+  id          String              @id @default(uuid())
+  municipioId String
+  numero      String              @unique
+  categoria   RequisicaoCategoria
+  estado      RequisicaoEstado    @default(RASCUNHO)
+
+  // Campos comuns
+  designacao    String?
+  destinatario  String?
+  observacao    String?   @db.Text
+  direcaoId     String?
+  requerenteId  String
+  aprovadoPorId String?
+  aprovadoEm    DateTime?
+
+  // === SERVIÇO ===
+  tipoServico            TipoServico?
+  dataProximaAccao       DateTime?
+  beneficiarioServico    String?
+  especificacoesTecnicas String?      @db.Text
+
+  // === EMPREITADA ===
+  dataInicioObra      DateTime?
+  estadoObra          EstadoObra?
+  prazoExecucao       Int? // dias
+  percentagemExecucao Int?        @default(0) // 0-100
+
+  criadoEm   DateTime @default(now())
+  alteradoEm DateTime @updatedAt
+
+  // Relações
+  direcao    Direcao?          @relation(fields: [direcaoId], references: [id])
+  requerente Utilizador        @relation(fields: [requerenteId], references: [id])
+  itens      RequisicaoItem[]
+  anexos     RequisicaoAnexo[]
+
+  @@index([municipioId])
+  @@index([categoria])
+  @@index([estado])
+  @@index([direcaoId])
+  @@map("requisicoes_logistica")
+}
+
+model RequisicaoItem {
+  id             String  @id @default(uuid())
+  requisicaoId   String
+  tipoBem        String // ex: "Óleo", "Papel A4", "Açúcar"
+  unidadeMedida  String // ex: "litros", "kg", "resma"
+  quantidade     Decimal @db.Decimal(10, 2)
+  especificacoes String? // marca, referência, peso, etc.
+
+  requisicao RequisicaoLogistica @relation(fields: [requisicaoId], references: [id], onDelete: Cascade)
+
+  @@index([requisicaoId])
+  @@map("requisicao_itens")
+}
+
+model RequisicaoAnexo {
+  id           String   @id @default(uuid())
+  requisicaoId String
+  storageKey   String
+  direcao      String? // NORTE, SUL, ESTE, OESTE (para empreitadas)
+  descricao    String?
+  criadoEm     DateTime @default(now())
+
+  requisicao RequisicaoLogistica @relation(fields: [requisicaoId], references: [id], onDelete: Cascade)
+
+  @@index([requisicaoId])
+  @@map("requisicao_anexos")
+}
+
+model Departamento {
+  id           String       @id @default(uuid())
+  direcaoId    String
+  nome         String
+  descricao    String?
+  criadoEm     DateTime     @default(now())
+  alteradoEm   DateTime     @updatedAt
+  direcao      Direcao      @relation(fields: [direcaoId], references: [id], onDelete: Cascade)
+  utilizadores Utilizador[]
+
+  @@unique([direcaoId, nome])
+  @@map("departamentos")
+}
+
+model Perfil {
+  id                   String                      @id @default(uuid())
+  nome                 String                      @unique
+  descricao            String?
+  acessoIlimitadoPonto Boolean                     @default(false)
+  activo               Boolean                     @default(true)
+  sistemico            Boolean                     @default(false)
+  criadoEm             DateTime                    @default(now())
+  alteradoEm           DateTime                    @updatedAt
+  pedidosSolicitantes  PedidoValidacaoIdentidade[]
+  permissoes           PerfilPermissao[]
+  utilizadores         UtilizadorPerfil[]
+
+  @@map("perfis")
+}
+
+model Permissao {
+  id        String            @id @default(uuid())
+  recurso   String
+  accao     String
+  chave     String            @unique
+  descricao String?
+  perfis    PerfilPermissao[]
+
+  @@unique([recurso, accao])
+  @@map("permissoes")
+}
+
+model PerfilPermissao {
+  id          String    @id @default(uuid())
+  perfilId    String
+  permissaoId String
+  criadoEm    DateTime  @default(now())
+  perfil      Perfil    @relation(fields: [perfilId], references: [id], onDelete: Cascade)
+  permissao   Permissao @relation(fields: [permissaoId], references: [id], onDelete: Cascade)
+
+  @@unique([perfilId, permissaoId])
+  @@map("perfis_permissoes")
+}
+
+model UtilizadorPerfil {
+  id             String      @id @default(uuid())
+  utilizadorId   String
+  perfilId       String
+  atribuidoPorId String?
+  criadoEm       DateTime    @default(now())
+  atribuidoPor   Utilizador? @relation("PerfisAtribuidosPorMim", fields: [atribuidoPorId], references: [id])
+  perfil         Perfil      @relation(fields: [perfilId], references: [id], onDelete: Cascade)
+  utilizador     Utilizador  @relation("PerfisDoUtilizador", fields: [utilizadorId], references: [id], onDelete: Cascade)
+
+  @@unique([utilizadorId, perfilId])
+  @@map("utilizador_perfis")
+}
+
+model Utilizador {
+  id                                String                      @id @default(uuid())
+  municipioId                       String
+  nomeCompleto                      String
+  email                             String                      @unique
+  passwordHash                      String
+  tipoConta                         TipoConta
+  estado                            EstadoUtilizador            @default(PENDENTE_VALIDACAO)
+  emailConfirmado                   Boolean                     @default(false)
+  emailConfirmadoEm                 DateTime?
+  telefone                          String?
+  endereco                          String?
+  dataNascimento                    DateTime?
+  direcaoId                         String?
+  superiorId                        String?
+  departamentoId                    String?
+  funcao                            String?
+  areaResponsabilidade              AreaResponsabilidade?
+  nomeEmpresa                       String?
+  nifEmpresa                        String?                     @unique
+  nomeInstituicao                   String?
+  nipcInstituicao                   String?                     @unique
+  nomeComissao                      String?
+  bairroZona                        String?
+  cargoComissao                     String?
+  documentoTipo                     String?
+  documentoNumero                   String?                     @unique
+  documentoValidadoEm               DateTime?
+  documentoValidadoPorId            String?
+  mfaActivo                         Boolean                     @default(false)
+  mfaSecret                         String?
+  deveTrocarPassword                Boolean                     @default(false)
+  tentativasLoginFalhadas           Int                         @default(0)
+  bloqueadoAte                      DateTime?
+  ativo                             Boolean                     @default(true)
+  criadoEm                          DateTime                    @default(now())
+  alteradoEm                        DateTime                    @updatedAt
+  agendamentosChamados              Agendamento[]               @relation("AgendamentoChamadoPor")
+  agendamentosAtendidos             Agendamento[]               @relation("AgendamentosAtendidos")
+  agendamentosComoRequerente        Agendamento[]               @relation("AgendamentosComoRequerente")
+  contactosInstitucionaisCriados    ContactoInstitucional[]     @relation("ContactoInstitucionalCriadoPor")
+  conteudosPublicosCriados          ConteudoPublico[]           @relation("ConteudoPublicoCriadoPor")
+  conteudosPublicosPublicados       ConteudoPublico[]           @relation("ConteudoPublicoPublicadoPor")
+  documentos                        Documento[]
+  emailConfirmationToken            EmailConfirmationToken[]
+  funcionario                       Funcionario?
+  logAuditoria                      LogAuditoria[]
+  notificacoes                      Notificacao[]
+  pagamentosCriados                 Pagamento[]
+  passwordResetTokens               PasswordResetToken[]
+  pedidosValidacao                  PedidoValidacaoIdentidade[]
+  processosGenericosComoRequerente  ProcessoGenerico[]          @relation("ProcessosGenericosComoRequerente")
+  processosGenericosComoResponsavel ProcessoGenerico[]          @relation("ProcessosGenericosResponsavel")
+  processoGenericoAnexos            ProcessoGenericoAnexo[]
+  processoGenericoTransicoes        ProcessoGenericoTransicao[]
+  refreshToken                      RefreshToken[]
+  perfisAtribuidos                  UtilizadorPerfil[]          @relation("PerfisAtribuidosPorMim")
+  perfis                            UtilizadorPerfil[]          @relation("PerfisDoUtilizador")
+  departamento                      Departamento?               @relation(fields: [departamentoId], references: [id])
+  direcao                           Direcao?                    @relation(fields: [direcaoId], references: [id])
+  municipio                         Municipio                   @relation(fields: [municipioId], references: [id])
+  superior                          Utilizador?                 @relation("HierarquiaUtilizador", fields: [superiorId], references: [id])
+  subordinados                      Utilizador[]                @relation("HierarquiaUtilizador")
+  requisicoesLogistica              RequisicaoLogistica[]
+  ocorrenciasCriadas                Ocorrencia[]                @relation("OcorrenciasCriadas")
+  ocorrenciasAtribuidas             Ocorrencia[]                @relation("OcorrenciasAtribuidas")
+  ocorrenciaMensagems               OcorrenciaMensagem[]
+  pedidoApoiosResolvidos            PedidoApoio[]               @relation("PedidoApoioResolvidoPor")
+  distribuicaoKitsRealizadas        DistribuicaoKit[]           @relation("DistribuicaoKitRealizadoPor")
+  receitasCriadas                   Receita[]                   @relation("ReceitasCriadasPor")
+  receitasAlteradas                 Receita[]                   @relation("ReceitasAlteradasPor")
+  servicosCriados                   Servico[]                   @relation("ServicosCriadosPor")
+  servicosAlterados                 Servico[]                   @relation("ServicosAlteradosPor")
+  processoGenericoMensagems         ProcessoGenericoMensagem[]
+
+  @@index([municipioId])
+  @@index([direcaoId])
+  @@index([departamentoId])
+  @@index([superiorId])
+  @@map("utilizadores")
+}
+
+model PedidoValidacaoIdentidade {
+  id                    String     @id @default(uuid())
+  municipioId           String
+  utilizadorId          String
+  documentoTipo         String?
+  documentoNumero       String?
+  documentoStorageKey   String?
+  documentoNomeOriginal String?
+  perfilSolicitadoId    String?
+  estado                String     @default("AGUARDANDO_DOCUMENTO")
+  motivoRejeicao        String?
+  aprovacaoNivel1PorId  String?
+  aprovacaoNivel1Em     DateTime?
+  aprovacaoNivel2PorId  String?
+  aprovacaoNivel2Em     DateTime?
+  criadoEm              DateTime   @default(now())
+  alteradoEm            DateTime   @updatedAt
+  municipio             Municipio  @relation(fields: [municipioId], references: [id], onDelete: Cascade)
+  perfilSolicitado      Perfil?    @relation(fields: [perfilSolicitadoId], references: [id])
+  utilizador            Utilizador @relation(fields: [utilizadorId], references: [id], onDelete: Cascade)
+
+  @@index([municipioId])
+  @@index([utilizadorId])
+  @@index([estado])
+  @@map("pedidos_validacao_identidade")
+}
+
+model Intercambio {
+  id                  String    @id @default(uuid())
+  direcaoOrigemId     String
+  municipioDestinoId  String
+  numeroProtocolo     String    @unique
+  assunto             String
+  estado              String    @default("ENVIADO")
+  documentoStorageKey String?
+  enviadoEm           DateTime  @default(now())
+  recebidoEm          DateTime?
+  confirmadoEm        DateTime?
+  direcaoOrigem       Direcao   @relation(fields: [direcaoOrigemId], references: [id])
+  municipioDestino    Municipio @relation(fields: [municipioDestinoId], references: [id])
+
+  @@index([direcaoOrigemId])
+  @@index([municipioDestinoId])
+  @@map("intercambios")
+}
+
+model EmailConfirmationToken {
+  id           String     @id @default(uuid())
+  utilizadorId String
+  tokenHash    String     @unique
+  expiraEm     DateTime
+  usadoEm      DateTime?
+  criadoEm     DateTime   @default(now())
+  utilizador   Utilizador @relation(fields: [utilizadorId], references: [id], onDelete: Cascade)
+
+  @@index([utilizadorId])
+  @@map("email_confirmation_tokens")
+}
+
+model PasswordResetToken {
+  id           String     @id @default(uuid())
+  utilizadorId String
+  tokenHash    String     @unique
+  expiraEm     DateTime
+  usadoEm      DateTime?
+  criadoEm     DateTime   @default(now())
+  utilizador   Utilizador @relation(fields: [utilizadorId], references: [id], onDelete: Cascade)
+
+  @@index([utilizadorId])
+  @@map("password_reset_tokens")
+}
+
+model RefreshToken {
+  id           String     @id @default(uuid())
+  utilizadorId String
+  tokenHash    String     @unique
+  expiraEm     DateTime
+  revogadoEm   DateTime?
+  ipOrigem     String?
+  userAgent    String?
+  criadoEm     DateTime   @default(now())
+  utilizador   Utilizador @relation(fields: [utilizadorId], references: [id], onDelete: Cascade)
+
+  @@index([utilizadorId])
+  @@map("refresh_tokens")
+}
+
+model LogAuditoria {
+  id           String      @id @default(uuid())
+  municipioId  String
+  utilizadorId String?
+  accao        String
+  entidade     String
+  entidadeId   String?
+  detalhes     Json?
+  ipOrigem     String?
+  userAgent    String?
+  criadoEm     DateTime    @default(now())
+  utilizador   Utilizador? @relation(fields: [utilizadorId], references: [id])
+
+  @@index([utilizadorId])
+  @@index([municipioId])
+  @@index([criadoEm])
+  @@map("logs_auditoria")
+}
+
+/**
+ * Assinatura electrónica (secções 5.4 e 20 do documento técnico) —
+ * "Assinatura electrónica obrigatória para: pareceres jurídicos finais,
+ * despachos do Administrador, contratos, autos de fiscalização... com
+ * validade jurídica e trilha de verificação".
+ * ANTES DESTA ALTERAÇÃO: não existia nenhuma forma de assinar nada —
+ * documentos eram só anexados como ficheiro (`storageKey`), sem hash de
+ * integridade nem qualquer noção de assinatura.
+ * Não é uma assinatura digital PKI (X.509/certificado qualificado) — não
+ * há infra-estrutura de certificação para isso neste projecto. É um
+ * mecanismo prático de não-repúdio: hash SHA-256 do conteúdo assinado +
+ * HMAC (com um segredo do servidor) sobre {hash, signatário, timestamp},
+ * para que qualquer alteração posterior ao conteúdo OU ao próprio registo
+ * de assinatura seja detectável. `referenciaTipo`/`referenciaId` é uma
+ * referência polimórfica (não há uma tabela única "Documento assinável" —
+ * pode apontar para um ProcessoGenerico, um Documento, etc.).
+ */
+model AssinaturaEletronica {
+  id             String   @id @default(uuid())
+  municipioId    String
+  signatarioId   String
+  referenciaTipo String // "PROCESSO_GENERICO" | "DOCUMENTO" | "FISCALIZACAO_DETALHE" | ...
+  referenciaId   String
+  tipoAssinatura String // "PARECER_JURIDICO" | "DESPACHO" | "CONTRATO" | "AUTO_FISCALIZACAO"
+  hashConteudo   String // SHA-256 (hex) do conteúdo assinado, em texto canónico
+  assinaturaHmac String // HMAC-SHA256 (hex) de {hashConteudo, signatarioId, criadoEm}
+  ipOrigem       String?
+  criadoEm       DateTime @default(now())
+
+  @@index([municipioId, referenciaTipo, referenciaId])
+  @@index([municipioId, signatarioId])
+  @@map("assinaturas_eletronicas")
+}
+
+/**
+ * Arquivo Digital (secção 8.1 do documento técnico) — substitui o arquivo
+ * físico em papel por pastas digitais organizadas livremente pelo
+ * utilizador ("inserir o nome da pasta onde vai estar guardado o
+ * documento"). `pastaPaiId` permite sub-pastas (hierarquia arbitrária);
+ * `direcaoId` é opcional — quando definido, restringe a pasta a uma
+ * direcção/secção específica (ex.: pasta "Contratos 2026" só visível à
+ * Secretaria Geral); quando null, a pasta é do município.
+ * A Biblioteca Jurídica Digital (secção 10.1) e o GEPE (secção 11) não
+ * têm modelo de dados próprio — reaproveitam este mesmo sistema de
+ * pastas/documentos, distinguidos por convenção de nome de pasta (ex.:
+ * "Biblioteca Jurídica / Legislação Municipal").
+ */
+model Pasta {
+  id          String   @id @default(uuid())
+  municipioId String
+  nome        String
+  pastaPaiId  String?
+  direcaoId   String?
+  criadoPorId String
+  criadoEm    DateTime @default(now())
+  alteradoEm  DateTime @updatedAt
+
+  pastaPai   Pasta?      @relation("SubPastas", fields: [pastaPaiId], references: [id], onDelete: Cascade)
+  subPastas  Pasta[]     @relation("SubPastas")
+  direcao    Direcao?    @relation(fields: [direcaoId], references: [id])
+  documentos Documento[]
+
+  @@index([municipioId, pastaPaiId])
+  @@index([municipioId, direcaoId])
+  @@map("pastas")
+}
+
+model Documento {
+  id           String        @id @default(uuid())
+  municipioId  String
+  pastaId      String?
+  direcaoId    String?
+  utilizadorId String?
+  tipo         String?
+  nome         String
+  storageKey   String
+  nomeOriginal String?
+  descricao    String?
+  criadoEm     DateTime      @default(now())
+  alteradoEm   DateTime      @updatedAt
+  pasta        Pasta?        @relation(fields: [pastaId], references: [id])
+  direcao      Direcao?      @relation(fields: [direcaoId], references: [id])
+  utilizador   Utilizador?   @relation(fields: [utilizadorId], references: [id])
+  diplomaLegal DiplomaLegal?
+  planoGepe    PlanoGepe?
+
+  @@index([municipioId, pastaId])
+  @@index([direcaoId])
+  @@index([utilizadorId])
+  @@map("documentos")
+}
+
+/**
+ * Biblioteca Jurídica Digital (secção 10.1 do documento técnico) —
+ * "legislação municipal, posturas municipais, regulamento de taxas,
+ * plano director municipal, contencioso e activo, Diário da República,
+ * decretos presidenciais, despachos ministeriais... indexados e
+ * pesquisáveis. Acervo inicial de aproximadamente 200 diplomas legais".
+ * Reaproveita o Arquivo Digital (`Documento`) para o ficheiro em si
+ * (PDF do diploma) — este modelo só guarda os metadados que tornam o
+ * acervo pesquisável por categoria/número/data, que um documento genérico
+ * não tem.
+ */
+model DiplomaLegal {
+  id             String                @id @default(uuid())
+  municipioId    String
+  categoria      CategoriaDiplomaLegal
+  numero         String?
+  titulo         String
+  dataPublicacao DateTime?
+  estado         EstadoDiplomaLegal    @default(VIGENTE)
+  documentoId    String?               @unique
+  criadoPorId    String
+  criadoEm       DateTime              @default(now())
+  alteradoEm     DateTime              @updatedAt
+
+  documento Documento? @relation(fields: [documentoId], references: [id])
+
+  @@index([municipioId, categoria])
+  @@index([municipioId, estado])
+  @@map("diplomas_legais")
+}
+
+enum CategoriaDiplomaLegal {
+  LEGISLACAO_MUNICIPAL
+  POSTURA_MUNICIPAL
+  REGULAMENTO_TAXAS
+  PLANO_DIRECTOR_MUNICIPAL
+  CONTENCIOSO
+  DIARIO_REPUBLICA
+  DECRETO_PRESIDENCIAL
+  DESPACHO_MINISTERIAL
+  OUTRO
+}
+
+enum EstadoDiplomaLegal {
+  VIGENTE
+  REVOGADO
+}
+
+/**
+ * GEPE — Gabinete de Estudos, Planeamento e Estatística (secção 11 do
+ * documento técnico). Cobre o Plano de Desenvolvimento Municipal (PDM) e
+ * os Planos Anuais de Actividades com o MESMO modelo (`tipo`
+ * discrimina), já que estruturalmente são o mesmo fluxo: elaborar →
+ * submeter ao Administrador → aprovar/rejeitar. "Acompanhamento de
+ * investimentos públicos" (ligação a Empreitadas) NÃO tem modelo próprio
+ * aqui — é uma vista de leitura sobre `ProcessoGenerico` (tipo
+ * REQUISICAO_EMPREITADA), para não duplicar dados que já existem.
+ */
+model PlanoGepe {
+  id                       String          @id @default(uuid())
+  municipioId              String
+  tipo                     TipoPlanoGepe
+  titulo                   String
+  ano                      Int?
+  periodoInicio            DateTime?
+  periodoFim               DateTime?
+  objectivos               String?
+  estado                   EstadoPlanoGepe @default(RASCUNHO)
+  documentoId              String?         @unique
+  submetidoPorId           String?
+  submetidoEm              DateTime?
+  aprovadoPorId            String?
+  aprovadoEm               DateTime?
+  observacoesAdministrador String?
+  criadoPorId              String
+  criadoEm                 DateTime        @default(now())
+  alteradoEm               DateTime        @updatedAt
+
+  documento Documento? @relation(fields: [documentoId], references: [id])
+
+  @@index([municipioId, tipo])
+  @@index([municipioId, estado])
+  @@map("planos_gepe")
+}
+
+enum TipoPlanoGepe {
+  PDM
+  PLANO_ANUAL_ACTIVIDADES
+}
+
+enum EstadoPlanoGepe {
+  RASCUNHO
+  SUBMETIDO
+  APROVADO
+  REJEITADO
+}
+
+enum NotificacaoTipo {
+  PROCESSO_SUBMETIDO
+  PROCESSO_ATRIBUIDO
+  PROCESSO_ATUALIZADO
+  PROCESSO_CONCLUIDO
+  ACAO_REQUERIDA
+  SISTEMA
+  OCORRENCIA_MENSAGEM
+  OCORRENCIA_ATUALIZADA
+  OCORRENCIA_ATRIBUIDA
+}
+
+model Notificacao {
+  id           String          @id @default(uuid())
+  utilizadorId String
+  titulo       String
+  mensagem     String
+  lida         Boolean         @default(false)
+  lidaEm       DateTime?
+  criadoEm     DateTime        @default(now())
+  utilizador   Utilizador      @relation(fields: [utilizadorId], references: [id], onDelete: Cascade)
+  tipo         NotificacaoTipo @default(SISTEMA)
+
+  @@index([utilizadorId])
+  @@map("notificacoes")
+}
+
+model ProcessoGenerico {
+  id                        String                      @id @default(uuid())
+  municipioId               String
+  numero                    String
+  tipo                      TipoProcessoGenerico
+  origem                    OrigemProcessoGenerico
+  assunto                   String
+  requerenteUtilizadorId    String?
+  direcaoOrigemId           String?
+  direcaoAtualId            String?
+  direcaoDespachadaId       String?
+  responsavelActualId       String?
+  estado                    EstadoProcessoGenerico      @default(RECEBIDO)
+  resultado                 String?
+  localizacaoActual         LocalizacaoProcesso         @default(EXPEDIENTE)
+  prazoLegalResposta        DateTime?
+  diasAlertaAntesPrazo      Int                         @default(3)
+  alertaEnviadoEm           DateTime?
+  escaladoEm                DateTime?
+  arquivoDigitalEm          DateTime?
+  arquivoMortoEm            DateTime?
+  aguardaPagamento          Boolean                     @default(false)
+  servicoCodigo             String?
+  criadoEm                  DateTime                    @default(now())
+  alteradoEm                DateTime                    @updatedAt
+  agendamentos              Agendamento[]
+  pagamentos                Pagamento[]
+  direcaoAtual              Direcao?                    @relation("ProcessosGenericosAtual", fields: [direcaoAtualId], references: [id])
+  direcaoDespachada         Direcao?                    @relation("ProcessosGenericosDespachada", fields: [direcaoDespachadaId], references: [id])
+  direcaoOrigem             Direcao?                    @relation("ProcessosGenericosOrigem", fields: [direcaoOrigemId], references: [id])
+  municipio                 Municipio                   @relation(fields: [municipioId], references: [id])
+  requerente                Utilizador?                 @relation("ProcessosGenericosComoRequerente", fields: [requerenteUtilizadorId], references: [id])
+  responsavelActual         Utilizador?                 @relation("ProcessosGenericosResponsavel", fields: [responsavelActualId], references: [id])
+  anexos                    ProcessoGenericoAnexo[]
+  transicoes                ProcessoGenericoTransicao[]
+  fiscalizacaoDetalhe       FiscalizacaoDetalhe?
+  processoGenericoMensagems ProcessoGenericoMensagem[]
+
+  @@unique([municipioId, tipo, direcaoOrigemId, numero])
+  @@index([municipioId])
+  @@index([estado])
+  @@index([tipo])
+  @@index([direcaoAtualId])
+  @@index([responsavelActualId])
+  @@index([prazoLegalResposta])
+  @@index([servicoCodigo])
+  @@index([localizacaoActual])
+  @@index([direcaoDespachadaId])
+  @@map("processos_genericos")
+}
+
+model ProcessoGenericoMensagem {
+  id                String    @id @default(uuid())
+  processoId        String
+  autorId           String
+  mensagem          String? 
+  anexoStorageKey   String?
+  anexoNomeFicheiro String?
+  anexoMimeType     String?
+  anexoTamanhoBytes Int?
+  lida              Boolean   @default(false)
+  lidaEm            DateTime?
+  criadoEm          DateTime  @default(now())
+
+  processo ProcessoGenerico @relation(fields: [processoId], references: [id], onDelete: Cascade)
+  autor    Utilizador       @relation(fields: [autorId], references: [id])
+
+  @@index([processoId, lida])
+  @@map("processos_genericos_mensagens")
+}
+
+model FiscalizacaoDetalhe {
+  id                      String                @id @default(uuid())
+  processoId              String                @unique
+  municipioId             String
+  tipoAccao               TipoAccaoFiscalizacao
+  estabelecimentoNome     String?
+  estabelecimentoEndereco String?
+  tipoInfraccao           String?
+  descricaoInfraccao      String?
+  valorCoima              Decimal?              @db.Decimal(14, 2)
+  coimaAplicadaEm         DateTime?
+  dataVistoria            DateTime?
+  fiscalResponsavelId     String?
+  criadoEm                DateTime              @default(now())
+  alteradoEm              DateTime              @updatedAt
+
+  processo ProcessoGenerico @relation(fields: [processoId], references: [id], onDelete: Cascade)
+
+  @@index([municipioId, estabelecimentoNome])
+  @@index([municipioId, tipoAccao])
+  @@map("fiscalizacao_detalhes")
+}
+
+enum TipoAccaoFiscalizacao {
+  AUTO_NOTICIA
+  CONTRA_ORDENACAO
+  VISTORIA
+}
+
+model ProcessoGenericoTransicao {
+  id               String                  @id @default(uuid())
+  processoId       String
+  estadoAnterior   EstadoProcessoGenerico?
+  estadoNovo       EstadoProcessoGenerico
+  utilizadorId     String?
+  observacao       String?
+  visivelAoCidadao Boolean                 @default(true)
+  criadoEm         DateTime                @default(now())
+  processo         ProcessoGenerico        @relation(fields: [processoId], references: [id], onDelete: Cascade)
+  utilizador       Utilizador?             @relation(fields: [utilizadorId], references: [id])
+
+  @@index([processoId])
+  @@map("processos_genericos_transicoes")
+}
+
+model ProcessoGenericoAnexo {
+  id                  String            @id @default(uuid())
+  processoId          String
+  nomeFicheiro        String
+  storageKey          String
+  versao              Int               @default(1)
+  tipoDocumentoCodigo String?
+  tipoAnexo           TipoAnexoProcesso @default(ENTRADA)
+  utilizadorUploadId  String?
+  criadoEm            DateTime          @default(now())
+  processo            ProcessoGenerico  @relation(fields: [processoId], references: [id], onDelete: Cascade)
+  utilizadorUpload    Utilizador?       @relation(fields: [utilizadorUploadId], references: [id])
+
+  @@index([processoId])
+  @@index([processoId, tipoAnexo])
+  @@map("processos_genericos_anexos")
+}
+
+model Pagamento {
+  id                   String           @id @default(uuid())
+  municipioId          String
+  processoId           String
+  referencia           String           @unique
+  entidade             String
+  valor                Decimal          @db.Decimal(12, 2)
+  estado               EstadoPagamento  @default(PENDENTE)
+  criadoPorId          String?
+  expiraEm             DateTime?
+  pagoEm               DateTime?
+  metadadosConfirmacao Json?
+  criadoEm             DateTime         @default(now())
+  alteradoEm           DateTime         @updatedAt
+  criadoPor            Utilizador?      @relation(fields: [criadoPorId], references: [id])
+  municipio            Municipio        @relation(fields: [municipioId], references: [id])
+  processo             ProcessoGenerico @relation(fields: [processoId], references: [id], onDelete: Cascade)
+
+  @@index([municipioId])
+  @@index([processoId])
+  @@index([estado])
+  @@map("pagamentos")
+}
+
+model Receita {
+  id               String      @id @default(uuid())
+  municipioId      String
+  direcaoId        String
+  data             DateTime    @db.Date
+  orgaoArrecadador String
+  servicoNome      String
+  servicoCodigo    String?
+  numeroDli        String?
+  valorCobradoDli  Decimal     @db.Decimal(14, 2)
+  numeroDar        String?
+  valorPagoDar     Decimal     @db.Decimal(14, 2)
+  numeroRupe       String?
+  observacao       String?
+  criadoPorId      String?
+  alteradoPorId    String?
+  criadoEm         DateTime    @default(now())
+  alteradoEm       DateTime    @updatedAt
+  municipio        Municipio   @relation(fields: [municipioId], references: [id])
+  direcao          Direcao     @relation(fields: [direcaoId], references: [id], onDelete: Cascade)
+  criadoPor        Utilizador? @relation("ReceitasCriadasPor", fields: [criadoPorId], references: [id])
+  alteradoPor      Utilizador? @relation("ReceitasAlteradasPor", fields: [alteradoPorId], references: [id])
+
+  @@index([municipioId])
+  @@index([direcaoId])
+  @@index([data])
+  @@index([municipioId, data])
+  @@index([direcaoId, data])
+  @@map("receitas")
+}
+
+model Servico {
+  id                   String                    @id @default(uuid())
+  municipioId          String
+  codigo               String
+  nome                 String
+  descricao            String
+  tipoProcesso         TipoProcessoGenerico
+  direcaoResponsavelId String
+  origensPermitidas    OrigemProcessoGenerico[]
+  pago                 Boolean                   @default(false)
+  valorReferenciaKz    Decimal?                  @db.Decimal(12, 2)
+  fonte                String?
+  prazoDiasCorridos    Int                       @default(15)
+  diasAlertaAntesPrazo Int                       @default(3)
+  activo               Boolean                   @default(true)
+  criadoPorId          String?
+  alteradoPorId        String?
+  criadoEm             DateTime                  @default(now())
+  alteradoEm           DateTime                  @updatedAt
+  municipio            Municipio                 @relation(fields: [municipioId], references: [id])
+  direcaoResponsavel   Direcao                   @relation(fields: [direcaoResponsavelId], references: [id])
+  criadoPor            Utilizador?               @relation("ServicosCriadosPor", fields: [criadoPorId], references: [id])
+  alteradoPor          Utilizador?               @relation("ServicosAlteradosPor", fields: [alteradoPorId], references: [id])
+  documentosExigidos   ServicoDocumentoExigido[]
+
+  @@unique([municipioId, codigo])
+  @@index([municipioId])
+  @@index([direcaoResponsavelId])
+  @@index([activo])
+  @@map("servicos")
+}
+
+model ServicoDocumentoExigido {
+  id          String  @id @default(uuid())
+  servicoId   String
+  codigo      String
+  nome        String
+  obrigatorio Boolean @default(true)
+  ordem       Int     @default(0)
+  servico     Servico @relation(fields: [servicoId], references: [id], onDelete: Cascade)
+
+  @@index([servicoId])
+  @@map("servico_documentos_exigidos")
+}
+
+model Agendamento {
+  id                      String              @id @default(uuid())
+  municipioId             String
+  utilizadorId            String?
+  tipo                    TipoAgendamento
+  atendidoPorId           String?
+  chamadoPorId            String?
+  dataHoraInicio          DateTime
+  dataHoraFim             DateTime
+  motivo                  String
+  estado                  EstadoAgendamento   @default(SOLICITADO)
+  observacoes             String?
+  processoGenericoId      String?
+  numeroSenha             String?
+  chegouEm                DateTime?
+  atendimentoIniciadoEm   DateTime?
+  atendimentoConcluidoEm  DateTime?
+  ultimaNotificacaoFilaEm DateTime?
+  ofertasComoOrigem       OfertaAntecipacao[] @relation("OfertaOrigem")
+
+  criadoEm         DateTime          @default(now())
+  alteradoEm       DateTime          @updatedAt
+  chamadoPor       Utilizador?       @relation("AgendamentoChamadoPor", fields: [chamadoPorId], references: [id])
+  atendidoPor      Utilizador?       @relation("AgendamentosAtendidos", fields: [atendidoPorId], references: [id])
+  municipio        Municipio         @relation(fields: [municipioId], references: [id])
+  processoGenerico ProcessoGenerico? @relation(fields: [processoGenericoId], references: [id])
+  utilizador       Utilizador?       @relation("AgendamentosComoRequerente", fields: [utilizadorId], references: [id])
+
+  @@index([municipioId])
+  @@index([tipo])
+  @@index([dataHoraInicio])
+  @@index([estado])
+  @@map("agendamentos")
+}
+
+model ContadorSenha {
+  municipioId String
+  tipo        String
+  dia         String
+  contador    Int    @default(0)
+
+  @@id([municipioId, tipo, dia])
+  @@map("contadores_senha")
+}
+
+enum TipoVinculo {
+  QUADRO
+  CONTRATO
+  ESTAGIARIO
+}
+
+enum EstadoFuncionario {
+  ATIVO
+  EM_FERIAS
+  SUSPENSO
+  OUTRO
+}
+
+enum NivelHabilitacao {
+  ENSINO_PRIMARIO
+  ENSINO_SECUNDARIO
+  TECNICO_MEDIO
+  BACHARELATO
+  LICENCIATURA
+  POS_GRADUACAO
+  MESTRADO
+  DOUTORAMENTO
+  CERTIFICACAO_PROFISSIONAL
+  OUTRO
+}
+
+enum EstadoPedidoFerias {
+  SOLICITADO
+  APROVADO
+  REJEITADO
+  CANCELADO
+}
+
+model Funcionario {
+  id           String @id @default(uuid())
+  municipioId  String
+  utilizadorId String @unique
+
+  cargo            String
+  contactoTelefone String?
+  contactoEmail    String?
+  fotografiaUrl    String?
+  cvUrl            String?
+
+  tipoVinculo       TipoVinculo
+  dataInicioVinculo DateTime
+  dataFimVinculo    DateTime?
+
+  estado      EstadoFuncionario @default(ATIVO)
+  observacoes String?
+
+  ultimaNotificacaoFimVinculoEm    DateTime?
+  ultimaNotificacaoAusenciaPontoEm DateTime?
+
+  criadoEm   DateTime @default(now())
+  alteradoEm DateTime @updatedAt
+
+  utilizador    Utilizador     @relation(fields: [utilizadorId], references: [id])
+  habilitacoes  Habilitacao[]
+  pedidosFerias PedidoFerias[]
+  registosPonto RegistoPonto[]
+  direcao       Direcao?       @relation(fields: [direcaoId], references: [id])
+  direcaoId     String?
+
+  @@index([municipioId])
+  @@index([municipioId, estado])
+  @@index([municipioId, tipoVinculo, dataFimVinculo])
+}
+
+model RegistoPonto {
+  id            String             @id @default(uuid())
+  municipioId   String
+  funcionarioId String
+  tipo          TipoRegistoPonto
+  metodo        MetodoRegistoPonto @default(BIOMETRICO)
+  registadoEm   DateTime           @default(now())
+  ipOrigem      String?
+  observacoes   String?
+
+  funcionario Funcionario @relation(fields: [funcionarioId], references: [id], onDelete: Cascade)
+
+  @@index([municipioId, funcionarioId, registadoEm])
+  @@index([municipioId, registadoEm])
+  @@map("registos_ponto")
+}
+
+enum TipoRegistoPonto {
+  ENTRADA
+  SAIDA
+}
+
+enum MetodoRegistoPonto {
+  BIOMETRICO
+  MANUAL // registo manual por RH, com observações obrigatórias (justificação)
+}
+
+model Habilitacao {
+  id            String      @id @default(uuid())
+  municipioId   String
+  funcionarioId String
+  funcionario   Funcionario @relation(fields: [funcionarioId], references: [id])
+
+  nivel           NivelHabilitacao
+  curso           String
+  instituicao     String
+  anoConclusao    Int?
+  comprovativoUrl String?
+
+  criadoEm DateTime @default(now())
+
+  @@index([municipioId, funcionarioId])
+}
+
+model Ocorrencia {
+  id            String   @id @default(uuid())
+  numero        String   @unique
+  municipioId   String
+  criadoPorId   String
+  responsavelId String?
+  bairroZona    String
+  categoria     String
+  titulo        String
+  descricao     String
+  estado        String   @default("REGISTADA")
+  prioridade    String   @default("NORMAL")
+  comissaoId    String?
+  criadoEm      DateTime @default(now())
+  alteradoEm    DateTime @updatedAt
+
+  municipio   Municipio            @relation(fields: [municipioId], references: [id])
+  criadoPor   Utilizador           @relation("OcorrenciasCriadas", fields: [criadoPorId], references: [id])
+  responsavel Utilizador?          @relation("OcorrenciasAtribuidas", fields: [responsavelId], references: [id])
+  comissao    ComissaoModeradores? @relation(fields: [comissaoId], references: [id])
+  mensagens   OcorrenciaMensagem[]
+  anexos      OcorrenciaAnexo[]
+
+  @@index([comissaoId])
+  @@index([responsavelId])
+}
+
+model OcorrenciaMensagem {
+  id           String    @id @default(uuid())
+  ocorrenciaId String
+  autorId      String
+  mensagem     String
+  lida         Boolean   @default(false)
+  lidaEm       DateTime?
+  criadoEm     DateTime  @default(now())
+
+  ocorrencia Ocorrencia @relation(fields: [ocorrenciaId], references: [id])
+  autor      Utilizador @relation(fields: [autorId], references: [id])
+
+  @@index([ocorrenciaId, lida])
+}
+
+model OcorrenciaAnexo {
+  id           String   @id @default(uuid())
+  ocorrenciaId String
+  storageKey   String
+  nomeFicheiro String
+  mimeType     String
+  tamanhoBytes Int
+  criadoEm     DateTime @default(now())
+
+  ocorrencia Ocorrencia @relation(fields: [ocorrenciaId], references: [id])
+
+  @@index([ocorrenciaId])
+}
+
+model ComissaoModeradores {
+  id                   String                    @id @default(uuid())
+  municipioId          String
+  bairro               String
+  coordenadasLat       Float?
+  coordenadasLng       Float?
+  presidenteNome       String
+  presidenteContacto   String?
+  documentacaoLegalUrl String?
+  estado               EstadoComissaoModeradores @default(EM_REGULARIZACAO)
+  observacoes          String?
+  criadoEm             DateTime                  @default(now())
+  alteradoEm           DateTime                  @updatedAt
+
+  membros     MembroComissao[]
+  ocorrencias Ocorrencia[]
+
+  @@index([municipioId, estado])
+  @@index([municipioId, bairro])
+  @@map("comissoes_moradores")
+}
+
+enum EstadoComissaoModeradores {
+  ACTIVA
+  INACTIVA
+  EM_REGULARIZACAO
+}
+
+model MembroComissao {
+  id         String   @id @default(uuid())
+  comissaoId String
+  nome       String
+  cargo      String // ex.: Presidente, Vice-Presidente, Secretário, Vogal
+  contacto   String?
+  criadoEm   DateTime @default(now())
+
+  comissao ComissaoModeradores @relation(fields: [comissaoId], references: [id], onDelete: Cascade)
+
+  @@index([comissaoId])
+  @@map("membros_comissao")
+}
+
+model PedidoFerias {
+  id            String      @id @default(uuid())
+  municipioId   String
+  funcionarioId String
+  funcionario   Funcionario @relation(fields: [funcionarioId], references: [id])
+
+  dataInicio DateTime @db.Date // simplificação: férias em dias inteiros, sem componente de hora
+  dataFim    DateTime @db.Date
+
+  diasUteis      Int
+  motivo         String?
+  estado         EstadoPedidoFerias @default(SOLICITADO)
+  aprovadoPorId  String?
+  motivoRejeicao String?
+
+  criadoEm    DateTime  @default(now())
+  resolvidoEm DateTime?
+
+  @@index([municipioId, funcionarioId, estado])
+  @@index([municipioId, estado])
+}
+
+model OfertaAntecipacao {
+  id                   String                  @id @default(uuid())
+  municipioId          String
+  agendamentoId        String
+  agendamento          Agendamento             @relation("OfertaOrigem", fields: [agendamentoId], references: [id])
+  dataHoraInicioAntiga DateTime
+  dataHoraFimAntiga    DateTime
+  novaDataHoraInicio   DateTime
+  novaDataHoraFim      DateTime
+  estado               EstadoOfertaAntecipacao @default(PENDENTE)
+  expiraEm             DateTime
+  criadoEm             DateTime                @default(now())
+  resolvidoEm          DateTime?
+
+  @@index([municipioId, agendamentoId, estado])
+  @@index([expiraEm])
+}
+
+model ConteudoPublico {
+  id               String                   @id @default(uuid())
+  municipioId      String
+  chave            String
+  titulo           String
+  resumo           String?
+  corpo            String
+  categoria        CategoriaConteudoPublico @default(OUTRO)
+  estadoPublicacao EstadoPublicacaoConteudo @default(RASCUNHO)
+  gruposComAcesso  TipoConta[]
+  criadoPorId      String?
+  publicadoPorId   String?
+  publicadoEm      DateTime?
+  criadoEm         DateTime                 @default(now())
+  alteradoEm       DateTime                 @updatedAt
+  criadoPor        Utilizador?              @relation("ConteudoPublicoCriadoPor", fields: [criadoPorId], references: [id])
+  municipio        Municipio                @relation(fields: [municipioId], references: [id])
+  publicadoPor     Utilizador?              @relation("ConteudoPublicoPublicadoPor", fields: [publicadoPorId], references: [id])
+
+  @@unique([municipioId, chave])
+  @@index([municipioId])
+  @@index([estadoPublicacao])
+  @@index([categoria])
+  @@map("conteudos_publicos")
+}
+
+model ContactoInstitucional {
+  id             String                    @id @default(uuid())
+  municipioId    String
+  tipo           TipoContactoInstitucional
+  nome           String
+  cargo          String?
+  instituicao    String?
+  direcaoId      String?
+  telefone       String?
+  email          String?
+  endereco       String?
+  notas          String?
+  visivelPublico Boolean                   @default(false)
+  criadoPorId    String?
+  criadoEm       DateTime                  @default(now())
+  alteradoEm     DateTime                  @updatedAt
+  criadoPor      Utilizador?               @relation("ContactoInstitucionalCriadoPor", fields: [criadoPorId], references: [id])
+  direcao        Direcao?                  @relation(fields: [direcaoId], references: [id])
+  municipio      Municipio                 @relation(fields: [municipioId], references: [id])
+
+  @@index([municipioId])
+  @@index([tipo])
+  @@index([visivelPublico])
+  @@index([direcaoId])
+  @@map("contactos_institucionais")
+}
+
+enum AreaResponsabilidade {
+  POLITICA_SOCIAL_COMUNIDADE
+  ECONOMICA_FINANCEIRA
+  TECNICA_INFRAESTRUTURAS_SERVICOS
+}
+
+enum TipoConta {
+  INTERNO
+  CIDADAO
+  EMPRESA
+  INSTITUICAO
+  COMISSAO_MORADORES
+}
+
+enum EstadoUtilizador {
+  ACTIVA
+  SUSPENSA
+  BLOQUEADA
+  PENDENTE_VALIDACAO
+}
+
+enum TipoOrgao {
+  ORGAO_APOIO_CONSULTIVO
+  SERVICO_APOIO_TECNICO
+  SERVICO_APOIO_INSTRUMENTAL
+  DIRECCAO_EXECUTIVA_DESCONCENTRADA
+}
+
+enum TipoProcesso {
+  ENTRADA
+  SAIDA
+}
+
+enum TipoProcessoGenerico {
+  EXPEDIENTE
+  PARECER_JURIDICO
+  REQUISICAO_BEM_SERVICO
+  REQUISICAO_EMPREITADA
+  PEDIDO_AUDIENCIA
+  RECLAMACAO
+  DENUNCIA
+  LICENCIAMENTO
+  SUGESTAO
+  DOACAO
+  AUTO_NOTICIA
+  CONTRA_ORDENACAO
+  VISTORIA
+}
+
+enum TipoAnexoProcesso {
+  ENTRADA
+  SAIDA
+}
+
+enum EstadoOfertaAntecipacao {
+  PENDENTE
+  ACEITE
+  RECUSADA
+  EXPIRADA
+  SUBSTITUIDA
+}
+
+enum OrigemProcessoGenerico {
+  CIDADAO
+  EMPRESA
+  INSTITUICAO
+  INTERNO
+  COMISSAO_MORADORES
+}
+
+enum EstadoProcessoGenerico {
+  RECEBIDO
+  EM_ANALISE
+  EM_PARECER
+  AGUARDANDO_DESPACHO
+  DEFERIDO
+  INDEFERIDO
+  CONCLUIDO
+  DEVOLVIDO
+}
+
+enum LocalizacaoProcesso {
+  EXPEDIENTE
+  GABINETE_ADMINISTRADOR
+  AGUARDA_DESPACHO_ROTEAMENTO
+  EXPEDIENTE_A_ENVIAR
+  DIRECCAO_COMPETENTE
+  PARECER_ASSESSOR_JURIDICO
+  RESPOSTA_A_SUBIR
+  CONCLUIDO_NOTIFICADO
+  PREPARACAO_SAIDA
+  AGUARDA_DESPACHO_SAIDA
+  EXPEDIENTE_SAIDA_A_FORMALIZAR
+  EXPEDIDO_EXTERNO
+}
+
+enum EstadoPagamento {
+  PENDENTE
+  PAGO
+  EXPIRADO
+  CANCELADO
+}
+
+enum TipoAgendamento {
+  ADMINISTRADOR
+  ASSISTENTE_SOCIAL
+}
+
+enum EstadoAgendamento {
+  SOLICITADO
+  CONFIRMADO
+  CANCELADO
+  REALIZADO
+  FALTA
+}
+
+enum EstadoPublicacaoConteudo {
+  RASCUNHO
+  PUBLICADO
+  PUBLICADO_PARCIAL
+  RESTRITO
+}
+
+enum CategoriaConteudoPublico {
+  NOTICIA
+  AVISO
+  SERVICO
+  TRANSPARENCIA
+  LEGISLACAO
+  EVENTO
+  OUTRO
+}
+
+enum TipoContactoInstitucional {
+  INTERNO
+  EXTERNO
+}

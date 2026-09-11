@@ -1,0 +1,85 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: simviana_postgres_local
+    restart: unless-stopped
+    environment:
+      TZ: Africa/Luanda
+      POSTGRES_USER: simviana
+      POSTGRES_PASSWORD: simviana_dev_password
+      POSTGRES_DB: simviana
+    ports:
+      - "5433:5432"
+    volumes:
+      - simviana_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U simviana"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: simviana_redis_v2
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - simviana_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  minio:
+    image: minio/minio:latest
+    container_name: simviana_minio_v2
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: simviana
+      MINIO_ROOT_PASSWORD: simviana_dev_password
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - simviana_minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build: .
+    container_name: simviana_api
+    restart: unless-stopped
+    environment:
+      TZ: Africa/Luanda
+      NODE_ENV: production
+      DATABASE_URL: postgresql://simviana:simviana_dev_password@postgres:5432/simviana
+      REDIS_URL: redis://redis:6379
+      MINIO_ENDPOINT: minio
+      MINIO_PORT: "9000"
+      MINIO_ROOT_USER: simviana
+      MINIO_ROOT_PASSWORD: simviana_dev_password
+    ports:
+      - "3001:3001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3001/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  simviana_postgres_data:
+  simviana_redis_data:
+  simviana_minio_data:
