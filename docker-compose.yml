@@ -1,83 +1,120 @@
 services:
+
   postgres:
     image: postgres:16-alpine
     container_name: simviana_postgres_local
     restart: unless-stopped
+
     environment:
       TZ: Africa/Luanda
-      POSTGRES_USER: simviana
-      POSTGRES_PASSWORD: simviana_dev_password
-      POSTGRES_DB: simviana
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+
     ports:
       - "5433:5432"
+
     volumes:
       - simviana_postgres_data:/var/lib/postgresql/data
+
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U simviana"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 5s
       timeout: 5s
       retries: 5
+
 
   redis:
     image: redis:7-alpine
     container_name: simviana_redis_v2
     restart: unless-stopped
+
     ports:
       - "6379:6379"
+
     volumes:
       - simviana_redis_data:/data
+
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 5s
       retries: 5
 
+
   minio:
     image: minio/minio:latest
     container_name: simviana_minio_v2
     restart: unless-stopped
+
     command: server /data --console-address ":9001"
+
     environment:
-      MINIO_ROOT_USER: simviana
-      MINIO_ROOT_PASSWORD: simviana_dev_password
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+
     ports:
       - "9000:9000"
       - "9001:9001"
+
     volumes:
       - simviana_minio_data:/data
+
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      test:
+        [
+          "CMD-SHELL",
+          "wget -qO- http://localhost:9000/minio/health/live || exit 1"
+        ]
       interval: 5s
       timeout: 5s
       retries: 5
 
+
   api:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
+
     container_name: simviana_api
     restart: unless-stopped
+
     environment:
       TZ: Africa/Luanda
       NODE_ENV: production
-      DATABASE_URL: postgresql://simviana:simviana_dev_password@postgres:5432/simviana
-      REDIS_URL: redis://redis:6379
+
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+
+      REDIS_URL: ${REDIS_URL}
+
       MINIO_ENDPOINT: minio
-      MINIO_PORT: "9000"
-      MINIO_ROOT_USER: simviana
-      MINIO_ROOT_PASSWORD: simviana_dev_password
+      MINIO_PORT: ${MINIO_PORT}
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+
     ports:
-      - "3001:3001"
+      - "${API_PORT}:3001"
+
     depends_on:
       postgres:
         condition: service_healthy
+
       redis:
         condition: service_healthy
+
       minio:
         condition: service_healthy
+
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:3001/health"]
+      test:
+        [
+          "CMD-SHELL",
+          "wget -qO- http://localhost:3001/health || exit 1"
+        ]
       interval: 15s
       timeout: 5s
       retries: 5
+
 
 volumes:
   simviana_postgres_data:
