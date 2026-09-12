@@ -255,6 +255,12 @@ export async function reagendarAgendamento(params: {
         `Só é possível reagendar agendamentos SOLICITADOS ou CONFIRMADOS (estado actual: ${agendamento.estado}).`
       );
     }
+    // Depois de chamado, a pessoa já está a caminho do balcão (ou a ser
+    // atendida) — reagendar deixa de fazer sentido operacional, mesmo que
+    // o estado ainda seja CONFIRMADO.
+    if (agendamento.atendimentoIniciadoEm) {
+      throw new AgendamentoEstadoInvalidoError("Não é possível reagendar um atendimento que já foi chamado.");
+    }
     if (params.utilizadorSolicitanteId && agendamento.utilizadorId !== params.utilizadorSolicitanteId) {
       throw new AgendamentoEstadoInvalidoError("Só o próprio requerente pode reagendar este agendamento.");
     }
