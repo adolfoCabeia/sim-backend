@@ -35,10 +35,13 @@ const adapter = new PrismaPg(buildPoolConfig(env.DATABASE_URL), {
   onConnectionError: onConnectionError("prisma"),
 });
 
-const authBypassAdapter = new PrismaPg(buildPoolConfig(env.SEED_DATABASE_URL), {
-  onPoolError: onPoolError("prismaAuthBypass"),
-  onConnectionError: onConnectionError("prismaAuthBypass"),
-});
+const authBypassAdapter = new PrismaPg(
+  buildPoolConfig(env.SEED_DATABASE_URL ?? env.DATABASE_URL),
+  {
+    onPoolError: onPoolError("prismaAuthBypass"),
+    onConnectionError: onConnectionError("prismaAuthBypass"),
+  }
+);
 
 export const prisma = new PrismaClient({
   adapter,
