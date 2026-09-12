@@ -1,0 +1,2 @@
+export declare const authenticatePlugin: (app: import("fastify").FastifyInstance<import("fastify").RawServerDefault, import("node:http").IncomingMessage, import("node:http").ServerResponse<import("node:http").IncomingMessage>, import("fastify").FastifyBaseLogger, import("fastify").FastifyTypeProviderDefault>) => Promise<void>;
+//# sourceMappingURL=authenticate.d.ts.map

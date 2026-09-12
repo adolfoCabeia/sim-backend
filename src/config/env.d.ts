@@ -1,0 +1,33 @@
+import "dotenv/config";
+export declare const env: {
+    NODE_ENV: "development" | "test" | "production";
+    PORT: number;
+    DATABASE_URL: string;
+    SEED_DATABASE_URL: string;
+    REDIS_URL: string;
+    MINIO_ENDPOINT: string;
+    MINIO_PORT: number;
+    MINIO_ACCESS_KEY: string;
+    MINIO_SECRET_KEY: string;
+    MINIO_USE_SSL: boolean;
+    MINIO_BUCKET_DOCUMENTOS: string;
+    JWT_SECRET: string;
+    JWT_ACCESS_EXPIRES_IN: string;
+    JWT_REFRESH_EXPIRES_IN: string;
+    MFA_ISSUER_NAME: string;
+    COOKIE_SECRET: string;
+    COOKIE_DOMAIN: string;
+    SMTP_HOST: string;
+    SMTP_PORT: number;
+    SMTP_SECURE: boolean;
+    SMTP_USER: string;
+    SMTP_PASSWORD: string;
+    EMAIL_SENDER_NAME: string;
+    EMAIL_SENDER_ADDRESS: string;
+    FRONTEND_URL: string;
+    EMAIL_CONFIRMATION_EXPIRES_IN_HOURS: number;
+    PASSWORD_RESET_EXPIRES_IN_HOURS: number;
+};
+export declare const isProduction: boolean;
+export declare const isDevelopment: boolean;
+//# sourceMappingURL=env.d.ts.map

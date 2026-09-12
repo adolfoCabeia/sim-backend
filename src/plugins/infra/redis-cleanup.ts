@@ -2,18 +2,8 @@ import fp from "fastify-plugin";
 import type { FastifyInstance } from "fastify";
 import { env } from "../../config/env.js";
 
-/**
- * Plugin para limpeza automática de chaves Redis expiradas.
- * Executa SCAN periodicamente para limpar chaves com TTL expirado.
- * Além de reduzir consumo de memória, melhora performance.
- */
 export const redisCleanupPlugin = fp(async (app: FastifyInstance) => {
-  if (!app.redis) {
-    app.log.warn("Redis not available for cleanup plugin");
-    return;
-  }
-
-  const redis = app.redis as any;
+  const redis = app.redis;
   const CLEANUP_INTERVAL = 60000; // 1 minuto
   const BATCH_SIZE = 100;
 

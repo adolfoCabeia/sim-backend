@@ -6,10 +6,10 @@ dist/
 .DS_Store
 coverage/
 
-/src/generated/prisma
+src/generated/prisma
 
 src/**/*.js
 src/**/*.js.map
-src/**/*.d.ts
 src/**/*.d.ts.map
+
 !src/generated/prisma/**
