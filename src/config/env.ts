@@ -6,9 +6,9 @@ const envSchema = z.object({
   PORT: z.coerce.number().default(3001),
 
   DATABASE_URL: z.string().min(1, "DATABASE_URL é obrigatório"),
-  SEED_DATABASE_URL: z
-    .string()
-    .min(1, "SEED_DATABASE_URL é obrigatório (role com BYPASSRLS, ver prisma/sql/enable_rls.sql)"),
+ SEED_DATABASE_URL: z
+  .string()
+  .optional(),
 
   REDIS_URL: z.string().min(1, "REDIS_URL é obrigatório"),
   ALERTAS_OPERACIONAIS_CRON: z.string().optional(), // ex: "0 * * * *" = de hora a hora
@@ -23,6 +23,11 @@ ALERTAS_OPERACIONAIS_CRON_ACTIVO: z.coerce.boolean().default(true),
     .default("false")
     .transform((v) => v === "true"),
   MINIO_BUCKET_DOCUMENTOS: z.string().default("simviana-documentos"),
+
+  AWS_REGION: z.string().min(1, "AWS_REGION é obrigatório"),
+AWS_ACCESS_KEY_ID: z.string().min(1, "AWS_ACCESS_KEY_ID é obrigatório"),
+AWS_SECRET_ACCESS_KEY: z.string().min(1, "AWS_SECRET_ACCESS_KEY é obrigatório"),
+S3_BUCKET_NAME: z.string().min(1, "S3_BUCKET_NAME é obrigatório"),
 
   JWT_SECRET: z.string().min(32, "JWT_SECRET deve ter pelo menos 32 caracteres"),
   JWT_ACCESS_EXPIRES_IN: z.string().default("15m"),

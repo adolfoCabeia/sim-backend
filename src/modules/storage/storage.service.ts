@@ -1,31 +1,28 @@
-import { Client as MinioClient } from "minio";
+import {
+  DeleteObjectCommand,
+  GetObjectCommand,
+  HeadObjectCommand,
+  PutObjectCommand,
+  S3Client,
+} from "@aws-sdk/client-s3";
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { randomUUID } from "node:crypto";
 import { env } from "../../config/env.js";
 
-let client: MinioClient | undefined;
-let bucketEnsured = false;
+let client: S3Client | undefined;
 
-function getClient(): MinioClient {
+function getClient(): S3Client {
   if (!client) {
-    client = new MinioClient({
-      endPoint: env.MINIO_ENDPOINT,
-      port: env.MINIO_PORT,
-      useSSL: env.MINIO_USE_SSL,
-      accessKey: env.MINIO_ACCESS_KEY,
-      secretKey: env.MINIO_SECRET_KEY,
+    client = new S3Client({
+      region: env.AWS_REGION,
+      credentials: {
+        accessKeyId: env.AWS_ACCESS_KEY_ID,
+        secretAccessKey: env.AWS_SECRET_ACCESS_KEY,
+      },
     });
   }
-  return client;
-}
 
-async function ensureBucket(bucket: string): Promise<void> {
-  if (bucketEnsured) return;
-  const c = getClient();
-  const exists = await c.bucketExists(bucket).catch(() => false);
-  if (!exists) {
-    await c.makeBucket(bucket);
-  }
-  bucketEnsured = true;
+  return client;
 }
 
 const MAGIC_BYTES: Array<{ mime: string; signature: number[] }> = [
@@ -38,19 +35,28 @@ export class TipoFicheiroInvalidoError extends Error {}
 
 export function detectarTipoReal(buffer: Buffer): string | null {
   for (const { mime, signature } of MAGIC_BYTES) {
-    const matches = signature.every((byte, index) => buffer[index] === byte);
+    const matches = signature.every(
+      (byte, index) => buffer[index] === byte
+    );
+
     if (matches) return mime;
   }
+
   return null;
 }
+
 const NOME_MAXIMO = 150;
 const NOME_FALLBACK = "documento";
 
 const CARACTERES_CONTROLO = /[\x00-\x1F\x7F]/g;
-const CARACTERES_UNICODE_DISFARCE = /[\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/g;
+const CARACTERES_UNICODE_DISFARCE =
+  /[\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/g;
+
 const SEPARADORES_DE_CAMINHO = /[/\\]/g;
 
-export function sanitizarNomeOriginal(nomeOriginal: string | undefined | null): string {
+export function sanitizarNomeOriginal(
+  nomeOriginal: string | undefined | null
+): string {
   if (!nomeOriginal) {
     return NOME_FALLBACK;
   }
@@ -94,48 +100,65 @@ export async function uploadDocumento(params: {
     );
   }
 
-  if (params.mimeTiposAceites && !params.mimeTiposAceites.includes(mimeType)) {
+  if (
+    params.mimeTiposAceites &&
+    !params.mimeTiposAceites.includes(mimeType)
+  ) {
     throw new TipoFicheiroInvalidoError(
-      `Este documento tem de ser submetido em ${params.mimeTiposAceites.join(" ou ")} — ficheiro recebido é ${mimeType}.`
+      `Este documento tem de ser submetido em ${params.mimeTiposAceites.join(
+        " ou "
+      )} — ficheiro recebido é ${mimeType}.`
     );
   }
 
   const nomeOriginalSeguro = sanitizarNomeOriginal(params.nomeOriginal);
 
-  const extensao = mimeType === "application/pdf" ? "pdf" : mimeType.split("/")[1];
+  const extensao =
+    mimeType === "application/pdf"
+      ? "pdf"
+      : mimeType.split("/")[1];
+
   const storageKey = `${params.prefixo}/${randomUUID()}.${extensao}`;
 
-  await ensureBucket(env.MINIO_BUCKET_DOCUMENTOS);
-
-  await getClient().putObject(
-    env.MINIO_BUCKET_DOCUMENTOS,
-    storageKey,
-    params.buffer,
-    params.buffer.length,
-    {
-      "Content-Type": mimeType,
-      "X-Amz-Meta-Original-Filename": encodeURIComponent(nomeOriginalSeguro),
-    }
+  await getClient().send(
+    new PutObjectCommand({
+      Bucket: env.S3_BUCKET_NAME,
+      Key: storageKey,
+      Body: params.buffer,
+      ContentLength: params.buffer.length,
+      ContentType: mimeType,
+      Metadata: {
+        "original-filename": encodeURIComponent(nomeOriginalSeguro),
+      },
+    })
   );
 
-  return { storageKey, mimeType, tamanhoBytes: params.buffer.length, nomeOriginal: nomeOriginalSeguro };
+  return {
+    storageKey,
+    mimeType,
+    tamanhoBytes: params.buffer.length,
+    nomeOriginal: nomeOriginalSeguro,
+  };
 }
- 
+
 export const MIME_TIPOS_ENTRADA_SAIDA = ["application/pdf"];
 
-export async function obterNomeOriginal(storageKey: string): Promise<string> {
+export async function obterNomeOriginal(
+  storageKey: string
+): Promise<string> {
   try {
-    const stat = await getClient().statObject(env.MINIO_BUCKET_DOCUMENTOS, storageKey);
-    const metaData = (stat.metaData ?? {}) as Record<string, string>;
-
-    const chaveEncontrada = Object.keys(metaData).find(
-      (chave) => chave.toLowerCase().replace(/^x-amz-meta-/, "") === "original-filename"
+    const response = await getClient().send(
+      new HeadObjectCommand({
+        Bucket: env.S3_BUCKET_NAME,
+        Key: storageKey,
+      })
     );
 
-    if (!chaveEncontrada) return NOME_FALLBACK;
+    const valor = response.Metadata?.["original-filename"];
 
-    const valor = metaData[chaveEncontrada];
-    if (!valor) return NOME_FALLBACK;
+    if (!valor) {
+      return NOME_FALLBACK;
+    }
 
     return decodeURIComponent(valor);
   } catch {
@@ -147,20 +170,44 @@ export async function gerarUrlVisualizacao(
   storageKey: string,
   expiraEmSegundos = 300
 ): Promise<string> {
-  return getClient().presignedGetObject(
-    env.MINIO_BUCKET_DOCUMENTOS,
-    storageKey,
-    expiraEmSegundos
+  const command = new GetObjectCommand({
+    Bucket: env.S3_BUCKET_NAME,
+    Key: storageKey,
+  });
+
+  return getSignedUrl(getClient(), command, {
+    expiresIn: expiraEmSegundos,
+  });
+}
+
+export async function eliminarDocumento(
+  storageKey: string
+): Promise<void> {
+  await getClient().send(
+    new DeleteObjectCommand({
+      Bucket: env.S3_BUCKET_NAME,
+      Key: storageKey,
+    })
   );
 }
 
-export async function eliminarDocumento(storageKey: string): Promise<void> {
-  await getClient().removeObject(env.MINIO_BUCKET_DOCUMENTOS, storageKey);
+export async function getObjectStream(
+  storageKey: string
+): Promise<NodeJS.ReadableStream> {
+  const response = await getClient().send(
+    new GetObjectCommand({
+      Bucket: env.S3_BUCKET_NAME,
+      Key: storageKey,
+    })
+  );
+
+  if (!response.Body) {
+    throw new Error("Objeto não possui conteúdo.");
+  }
+
+  return response.Body as NodeJS.ReadableStream;
 }
-export async function getObjectStream(storageKey: string): Promise<NodeJS.ReadableStream> {
-  await ensureBucket(env.MINIO_BUCKET_DOCUMENTOS);
-  return getClient().getObject(env.MINIO_BUCKET_DOCUMENTOS, storageKey);
-}
+
 export const storageService = {
   uploadDocumento,
   obterNomeOriginal,
