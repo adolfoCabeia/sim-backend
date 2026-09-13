@@ -106,6 +106,33 @@ export async function withTenantTransaction<T>(
         )
       `;
 
+      const contextoRls = await tx.$queryRaw<
+        Array<{
+          municipioAtual: string | null;
+          superAdmin: string | null;
+        }>
+      >`
+        SELECT
+          current_setting(
+            'app.current_municipio_id',
+            true
+          ) AS "municipioAtual",
+
+          current_setting(
+            'app.is_super_admin',
+            true
+          ) AS "superAdmin"
+      `;
+
+      logger.info(
+        {
+          municipioIdRecebido: municipioId,
+          municipioAtualNoPostgres: contextoRls[0]?.municipioAtual ?? null,
+          isSuperAdmin: contextoRls[0]?.superAdmin ?? null,
+        },
+        "Contexto RLS configurado"
+      );
+
       return fn(tx);
     },
     {
