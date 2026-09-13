@@ -517,21 +517,30 @@ export async function loginUser(
   }),
 });
   await withTenantTransaction(
-    utilizador.municipioId,
-    (tx: Prisma.TransactionClient) =>
-      tx.logAuditoria.create({
-        data: {
-          municipioId: utilizador.municipioId,
-          utilizadorId: utilizador.id,
-          accao: "LOGIN_SUCESSO",
-          entidade: "Utilizador",
-          entidadeId: utilizador.id,
-          ...(context.ipOrigem !== undefined && {
-            ipOrigem: context.ipOrigem,
-          }),
-        },
-      })
-  );
+  utilizador.municipioId,
+  async (tx) => {
+    await tx.$executeRaw`
+      INSERT INTO "logs_auditoria" (
+        "id",
+        "municipioId",
+        "utilizadorId",
+        "accao",
+        "entidade",
+        "entidadeId",
+        "ipOrigem"
+      )
+      VALUES (
+        gen_random_uuid(),
+        ${utilizador.municipioId},
+        ${utilizador.id},
+        'LOGIN_SUCESSO',
+        'Utilizador',
+        ${utilizador.id},
+        ${context.ipOrigem ?? null}
+      )
+    `;
+  },
+);
 
   return {
     utilizador: {
