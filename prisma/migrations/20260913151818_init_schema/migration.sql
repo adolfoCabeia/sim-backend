@@ -80,7 +80,7 @@ CREATE TYPE "TipoPlanoGepe" AS ENUM ('PDM', 'PLANO_ANUAL_ACTIVIDADES');
 CREATE TYPE "EstadoPlanoGepe" AS ENUM ('RASCUNHO', 'SUBMETIDO', 'APROVADO', 'REJEITADO');
 
 -- CreateEnum
-CREATE TYPE "NotificacaoTipo" AS ENUM ('PROCESSO_SUBMETIDO', 'PROCESSO_ATRIBUIDO', 'PROCESSO_ATUALIZADO', 'PROCESSO_CONCLUIDO', 'ACAO_REQUERIDA', 'SISTEMA');
+CREATE TYPE "NotificacaoTipo" AS ENUM ('PROCESSO_SUBMETIDO', 'PROCESSO_ATRIBUIDO', 'PROCESSO_ATUALIZADO', 'PROCESSO_CONCLUIDO', 'ACAO_REQUERIDA', 'SISTEMA', 'OCORRENCIA_MENSAGEM', 'OCORRENCIA_ATUALIZADA', 'OCORRENCIA_ATRIBUIDA');
 
 -- CreateEnum
 CREATE TYPE "TipoAccaoFiscalizacao" AS ENUM ('AUTO_NOTICIA', 'CONTRA_ORDENACAO', 'VISTORIA');
@@ -915,6 +915,23 @@ CREATE TABLE "processos_genericos" (
 );
 
 -- CreateTable
+CREATE TABLE "processos_genericos_mensagens" (
+    "id" TEXT NOT NULL,
+    "processoId" TEXT NOT NULL,
+    "autorId" TEXT NOT NULL,
+    "mensagem" TEXT,
+    "anexoStorageKey" TEXT,
+    "anexoNomeFicheiro" TEXT,
+    "anexoMimeType" TEXT,
+    "anexoTamanhoBytes" INTEGER,
+    "lida" BOOLEAN NOT NULL DEFAULT false,
+    "lidaEm" TIMESTAMP(3),
+    "criadoEm" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "processos_genericos_mensagens_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
 CREATE TABLE "fiscalizacao_detalhes" (
     "id" TEXT NOT NULL,
     "processoId" TEXT NOT NULL,
@@ -1018,6 +1035,8 @@ CREATE TABLE "servicos" (
     "pago" BOOLEAN NOT NULL DEFAULT false,
     "valorReferenciaKz" DECIMAL(12,2),
     "fonte" TEXT,
+    "prazoDiasCorridos" INTEGER NOT NULL DEFAULT 15,
+    "diasAlertaAntesPrazo" INTEGER NOT NULL DEFAULT 3,
     "activo" BOOLEAN NOT NULL DEFAULT true,
     "criadoPorId" TEXT,
     "alteradoPorId" TEXT,
@@ -1046,6 +1065,7 @@ CREATE TABLE "agendamentos" (
     "utilizadorId" TEXT,
     "tipo" "TipoAgendamento" NOT NULL,
     "atendidoPorId" TEXT,
+    "chamadoPorId" TEXT,
     "dataHoraInicio" TIMESTAMP(3) NOT NULL,
     "dataHoraFim" TIMESTAMP(3) NOT NULL,
     "motivo" TEXT NOT NULL,
@@ -1064,11 +1084,20 @@ CREATE TABLE "agendamentos" (
 );
 
 -- CreateTable
+CREATE TABLE "contadores_senha" (
+    "municipioId" TEXT NOT NULL,
+    "tipo" TEXT NOT NULL,
+    "dia" TEXT NOT NULL,
+    "contador" INTEGER NOT NULL DEFAULT 0,
+
+    CONSTRAINT "contadores_senha_pkey" PRIMARY KEY ("municipioId","tipo","dia")
+);
+
+-- CreateTable
 CREATE TABLE "Funcionario" (
     "id" TEXT NOT NULL,
     "municipioId" TEXT NOT NULL,
     "utilizadorId" TEXT NOT NULL,
-    "departamentoId" TEXT,
     "cargo" TEXT NOT NULL,
     "contactoTelefone" TEXT,
     "contactoEmail" TEXT,
@@ -1123,6 +1152,7 @@ CREATE TABLE "Ocorrencia" (
     "numero" TEXT NOT NULL,
     "municipioId" TEXT NOT NULL,
     "criadoPorId" TEXT NOT NULL,
+    "responsavelId" TEXT,
     "bairroZona" TEXT NOT NULL,
     "categoria" TEXT NOT NULL,
     "titulo" TEXT NOT NULL,
@@ -1142,6 +1172,8 @@ CREATE TABLE "OcorrenciaMensagem" (
     "ocorrenciaId" TEXT NOT NULL,
     "autorId" TEXT NOT NULL,
     "mensagem" TEXT NOT NULL,
+    "lida" BOOLEAN NOT NULL DEFAULT false,
+    "lidaEm" TIMESTAMP(3),
     "criadoEm" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
     CONSTRAINT "OcorrenciaMensagem_pkey" PRIMARY KEY ("id")
@@ -1151,7 +1183,10 @@ CREATE TABLE "OcorrenciaMensagem" (
 CREATE TABLE "OcorrenciaAnexo" (
     "id" TEXT NOT NULL,
     "ocorrenciaId" TEXT NOT NULL,
+    "storageKey" TEXT NOT NULL,
     "nomeFicheiro" TEXT NOT NULL,
+    "mimeType" TEXT NOT NULL,
+    "tamanhoBytes" INTEGER NOT NULL,
     "criadoEm" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
     CONSTRAINT "OcorrenciaAnexo_pkey" PRIMARY KEY ("id")
@@ -1579,6 +1614,9 @@ CREATE INDEX "processos_genericos_direcaoDespachadaId_idx" ON "processos_generic
 CREATE UNIQUE INDEX "processos_genericos_municipioId_tipo_direcaoOrigemId_numero_key" ON "processos_genericos"("municipioId", "tipo", "direcaoOrigemId", "numero");
 
 -- CreateIndex
+CREATE INDEX "processos_genericos_mensagens_processoId_lida_idx" ON "processos_genericos_mensagens"("processoId", "lida");
+
+-- CreateIndex
 CREATE UNIQUE INDEX "fiscalizacao_detalhes_processoId_key" ON "fiscalizacao_detalhes"("processoId");
 
 -- CreateIndex
@@ -1654,10 +1692,10 @@ CREATE INDEX "agendamentos_estado_idx" ON "agendamentos"("estado");
 CREATE UNIQUE INDEX "Funcionario_utilizadorId_key" ON "Funcionario"("utilizadorId");
 
 -- CreateIndex
-CREATE INDEX "Funcionario_municipioId_estado_idx" ON "Funcionario"("municipioId", "estado");
+CREATE INDEX "Funcionario_municipioId_idx" ON "Funcionario"("municipioId");
 
 -- CreateIndex
-CREATE INDEX "Funcionario_municipioId_departamentoId_idx" ON "Funcionario"("municipioId", "departamentoId");
+CREATE INDEX "Funcionario_municipioId_estado_idx" ON "Funcionario"("municipioId", "estado");
 
 -- CreateIndex
 CREATE INDEX "Funcionario_municipioId_tipoVinculo_dataFimVinculo_idx" ON "Funcionario"("municipioId", "tipoVinculo", "dataFimVinculo");
@@ -1676,6 +1714,15 @@ CREATE UNIQUE INDEX "Ocorrencia_numero_key" ON "Ocorrencia"("numero");
 
 -- CreateIndex
 CREATE INDEX "Ocorrencia_comissaoId_idx" ON "Ocorrencia"("comissaoId");
+
+-- CreateIndex
+CREATE INDEX "Ocorrencia_responsavelId_idx" ON "Ocorrencia"("responsavelId");
+
+-- CreateIndex
+CREATE INDEX "OcorrenciaMensagem_ocorrenciaId_lida_idx" ON "OcorrenciaMensagem"("ocorrenciaId", "lida");
+
+-- CreateIndex
+CREATE INDEX "OcorrenciaAnexo_ocorrenciaId_idx" ON "OcorrenciaAnexo"("ocorrenciaId");
 
 -- CreateIndex
 CREATE INDEX "comissoes_moradores_municipioId_estado_idx" ON "comissoes_moradores"("municipioId", "estado");
@@ -1897,6 +1944,12 @@ ALTER TABLE "processos_genericos" ADD CONSTRAINT "processos_genericos_requerente
 ALTER TABLE "processos_genericos" ADD CONSTRAINT "processos_genericos_responsavelActualId_fkey" FOREIGN KEY ("responsavelActualId") REFERENCES "utilizadores"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
+ALTER TABLE "processos_genericos_mensagens" ADD CONSTRAINT "processos_genericos_mensagens_processoId_fkey" FOREIGN KEY ("processoId") REFERENCES "processos_genericos"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "processos_genericos_mensagens" ADD CONSTRAINT "processos_genericos_mensagens_autorId_fkey" FOREIGN KEY ("autorId") REFERENCES "utilizadores"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+
+-- AddForeignKey
 ALTER TABLE "fiscalizacao_detalhes" ADD CONSTRAINT "fiscalizacao_detalhes_processoId_fkey" FOREIGN KEY ("processoId") REFERENCES "processos_genericos"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
@@ -1948,6 +2001,9 @@ ALTER TABLE "servicos" ADD CONSTRAINT "servicos_alteradoPorId_fkey" FOREIGN KEY 
 ALTER TABLE "servico_documentos_exigidos" ADD CONSTRAINT "servico_documentos_exigidos_servicoId_fkey" FOREIGN KEY ("servicoId") REFERENCES "servicos"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
+ALTER TABLE "agendamentos" ADD CONSTRAINT "agendamentos_chamadoPorId_fkey" FOREIGN KEY ("chamadoPorId") REFERENCES "utilizadores"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+
+-- AddForeignKey
 ALTER TABLE "agendamentos" ADD CONSTRAINT "agendamentos_atendidoPorId_fkey" FOREIGN KEY ("atendidoPorId") REFERENCES "utilizadores"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
@@ -1958,6 +2014,9 @@ ALTER TABLE "agendamentos" ADD CONSTRAINT "agendamentos_processoGenericoId_fkey"
 
 -- AddForeignKey
 ALTER TABLE "agendamentos" ADD CONSTRAINT "agendamentos_utilizadorId_fkey" FOREIGN KEY ("utilizadorId") REFERENCES "utilizadores"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "Funcionario" ADD CONSTRAINT "Funcionario_utilizadorId_fkey" FOREIGN KEY ("utilizadorId") REFERENCES "utilizadores"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "Funcionario" ADD CONSTRAINT "Funcionario_direcaoId_fkey" FOREIGN KEY ("direcaoId") REFERENCES "direcoes"("id") ON DELETE SET NULL ON UPDATE CASCADE;
@@ -1973,6 +2032,9 @@ ALTER TABLE "Ocorrencia" ADD CONSTRAINT "Ocorrencia_municipioId_fkey" FOREIGN KE
 
 -- AddForeignKey
 ALTER TABLE "Ocorrencia" ADD CONSTRAINT "Ocorrencia_criadoPorId_fkey" FOREIGN KEY ("criadoPorId") REFERENCES "utilizadores"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "Ocorrencia" ADD CONSTRAINT "Ocorrencia_responsavelId_fkey" FOREIGN KEY ("responsavelId") REFERENCES "utilizadores"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "Ocorrencia" ADD CONSTRAINT "Ocorrencia_comissaoId_fkey" FOREIGN KEY ("comissaoId") REFERENCES "comissoes_moradores"("id") ON DELETE SET NULL ON UPDATE CASCADE;

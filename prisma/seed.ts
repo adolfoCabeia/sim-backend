@@ -20,8 +20,20 @@ const pool = new Pool({
   },
 });
 
+pool.on("connect", () => {
+  console.log("🟢 PostgreSQL: conexão estabelecida");
+});
+
+pool.on("acquire", () => {
+  console.log("🔵 PostgreSQL: conexão adquirida");
+});
+
+pool.on("remove", () => {
+  console.log("🟡 PostgreSQL: conexão removida do pool");
+});
+
 pool.on("error", (err) => {
-  console.error("❌ Erro no PostgreSQL Pool:", err);
+  console.error("🔴 PostgreSQL Pool:", err);
 });
 
 const adapter = new PrismaPg(pool);
@@ -29,14 +41,24 @@ const adapter = new PrismaPg(pool);
 const prisma = new PrismaClient({
   adapter,
 });
-async function withMunicipio<T>(municipioId: string, fn: (tx: any) => Promise<T>): Promise<T> {
-  return prisma.$transaction(
-    async (tx) => {
-      await tx.$executeRaw`SELECT set_config('app.current_municipio_id', ${municipioId}, true)`;
-      return fn(tx);
-    },
-    { timeout: 300_000, maxWait: 30_000 }
-  );
+async function withMunicipio<T>(municipioId: string, fn: (tx: any) => Promise<T>, tentativas = 3): Promise<T> {
+  for (let i = 1; i <= tentativas; i++) {
+    try {
+      return await prisma.$transaction(
+        async (tx) => {
+          await tx.$executeRaw`SELECT set_config('app.current_municipio_id', ${municipioId}, true)`;
+          return fn(tx);
+        },
+        { timeout: 300_000, maxWait: 30_000 }
+      );
+    } catch (err: any) {
+      const transitorio = /Connection terminated|ECONNRESET|ETIMEDOUT/.test(String(err?.message));
+      if (!transitorio || i === tentativas) throw err;
+      console.warn(`   ⚠️  Ligação caiu (tentativa ${i}/${tentativas}), a repetir...`);
+      await new Promise((r) => setTimeout(r, 1000 * i));
+    }
+  }
+  throw new Error("unreachable");
 }
 
 const MUNICIPIOS_DATA = [
@@ -838,6 +860,7 @@ for (const permissoes of Object.values(PERFIL_PERMISSOES_MAP)) {
 }
 
 for (const [perfilNome, permissoes] of Object.entries(PERFIL_PERMISSOES_MAP)) {
+  
   const chefiaGabinete =
     perfilNome === "SUPER_ADMIN" ||
     perfilNome === "ADMINISTRADOR_MUNICIPAL" ||
