@@ -516,7 +516,7 @@ export async function loginUser(
     userAgent: context.userAgent,
   }),
 });
-  await withTenantTransaction(
+ await withTenantTransaction(
   utilizador.municipioId,
   async (tx) => {
     await tx.$executeRaw`
