@@ -1,15 +1,34 @@
 import "dotenv/config";
 import argon2 from "argon2";
+import { Pool } from "pg";
 import { PrismaPg } from "@prisma/adapter-pg";
-import { PrismaClient, type Perfil, type Municipio } from "../src/generated/prisma/client.js";
+import {
+  PrismaClient,
+  type Perfil,
+  type Municipio,
+} from "../src/generated/prisma/client.js";
 import { DIRECOES_TEMPLATE, DEPARTAMENTOS_POR_DIRECAO } from "../src/config/organograma.js";
 import { CATALOGO_SERVICOS_MUNICIPAIS } from "../src/config/catalogo-servicos.js";
-
-const adapter = new PrismaPg({
+const pool = new Pool({
   connectionString: process.env.DATABASE_URL!,
+  max: 1,
+  connectionTimeoutMillis: 15_000,
+  idleTimeoutMillis: 30_000,
+  keepAlive: true,
+  ssl: {
+    rejectUnauthorized: false,
+  },
 });
-const prisma = new PrismaClient({ adapter });
 
+pool.on("error", (err) => {
+  console.error("❌ Erro no PostgreSQL Pool:", err);
+});
+
+const adapter = new PrismaPg(pool);
+
+const prisma = new PrismaClient({
+  adapter,
+});
 async function withMunicipio<T>(municipioId: string, fn: (tx: any) => Promise<T>): Promise<T> {
   return prisma.$transaction(
     async (tx) => {
@@ -1147,7 +1166,8 @@ async function main() {
     console.error("Erro ao executar seed:", error);
     process.exit(1);
   } finally {
-    await prisma.$disconnect();
+     await prisma.$disconnect();
+  await pool.end();
   }
 }
 

@@ -1,10 +1,11 @@
 import { randomBytes, createHash } from "node:crypto";
-import { prismaAuthBypass, withTenantTransaction, readOnlyComRetry } from "../../config/prisma.js";
+import { withAuthBypass, withTenantTransaction, readOnlyComRetry } from "../../config/prisma.js";
+import type { Prisma } from "../../generated/prisma/client.js";
 import { env } from "../../config/env.js";
 import { hashPassword, verifyPassword } from "./password.service.js";
 import { verifyMfaToken } from "./mfa.service.js";
 import { issueRefreshToken } from "./jwt.service.js";
-import { sendConfirmationEmail, sendContaBloqueadaEmail, sendPasswordResetEmail, sendContaInternaCriadaEmail } from "../email/email.service.js";
+import { sendConfirmationEmail, sendContaBloqueadaEmail, sendPasswordResetEmail } from "../email/email.service.js";
 import type { RegisterInput, LoginInput } from "./auth.schema.js";
 import {
   verificarJanelaDeAcesso,
@@ -42,96 +43,111 @@ export async function registerUser(input: RegisterInput) {
     );
   }
 
-  const existente = await prismaAuthBypass.utilizador.findUnique({
-    where: { email: input.email },
-  });
-
-  if (existente) {
-    throw new EmailJaExisteError("Já existe uma conta com este email.");
-  }
-
-  if (input.documentoNumero) {
-    const documentoExistente = await prismaAuthBypass.utilizador.findUnique({
-      where: { documentoNumero: input.documentoNumero },
-    });
-    if (documentoExistente) {
-      throw new DocumentoJaExisteError("Já existe uma conta registada com este número de documento.");
-    }
-  }
-
   const passwordHash = await hashPassword(input.password);
   const exigeConfirmacaoEmail = (
     TIPOS_QUE_EXIGEM_CONFIRMACAO_EMAIL as readonly string[]
   ).includes(input.tipoConta);
 
-  let direcaoId: string | undefined;
-  if (input.direcaoSigla) {
-    const direcao = await prismaAuthBypass.direcao.findUnique({
-      where: { municipioId_sigla: { municipioId: input.municipioId, sigla: input.direcaoSigla } },
-      select: { id: true },
-    });
-    if (!direcao) {
-      throw new DirecaoNaoEncontradaError(
-        `A direcção "${input.direcaoSigla}" não existe neste município.`
-      );
-    }
-    direcaoId = direcao.id;
-  }
-
-  const utilizador = await prismaAuthBypass.utilizador.create({
-    data: {
-      municipioId: input.municipioId,
-      nomeCompleto: input.nomeCompleto,
-      email: input.email,
-      passwordHash,
-      tipoConta: input.tipoConta,
-      ...(direcaoId !== undefined && { direcaoId }),
-      emailConfirmado: !exigeConfirmacaoEmail,
-      ...(input.areaResponsabilidade !== undefined && { areaResponsabilidade: input.areaResponsabilidade }),
-      ...(input.telefone !== undefined && { telefone: input.telefone }),
-      ...(input.endereco !== undefined && { endereco: input.endereco }),
-      ...(input.documentoTipo !== undefined && { documentoTipo: input.documentoTipo }),
-      ...(input.documentoNumero !== undefined && { documentoNumero: input.documentoNumero }),
-      ...(input.nomeEmpresa !== undefined && { nomeEmpresa: input.nomeEmpresa }),
-      ...(input.nifEmpresa !== undefined && { nifEmpresa: input.nifEmpresa }),
-      ...(input.nomeInstituicao !== undefined && { nomeInstituicao: input.nomeInstituicao }),
-      ...(input.nipcInstituicao !== undefined && { nipcInstituicao: input.nipcInstituicao }),
-      ...(input.nomeComissao !== undefined && { nomeComissao: input.nomeComissao }),
-      ...(input.bairroZona !== undefined && { bairroZona: input.bairroZona }),
-    },
-  });
-  {
-    const perfilCorrespondente = await prismaAuthBypass.perfil.findFirst({
-      where: { nome: input.tipoConta, activo: true },
-      select: { id: true },
-    });
-    if (perfilCorrespondente) {
-      await prismaAuthBypass.utilizadorPerfil.create({
-        data: { utilizadorId: utilizador.id, perfilId: perfilCorrespondente.id },
+  // Tudo o que precisa de ignorar RLS (procurar duplicados, criar o
+  // utilizador, atribuir perfil, gravar auditoria) corre dentro da
+  // MESMA transação de bypass — atómico e um único round-trip lógico.
+  const { utilizador, municipioNome } = await withAuthBypass(
+    async (tx: Prisma.TransactionClient) => {
+      const existente = await tx.utilizador.findUnique({
+        where: { email: input.email },
       });
-    } else {
-      console.error(
-        `Perfil "${input.tipoConta}" não encontrado no catálogo, a conta ${utilizador.id} ficou sem permissões.`
-      );
+      if (existente) {
+        throw new EmailJaExisteError("Já existe uma conta com este email.");
+      }
+
+      if (input.documentoNumero) {
+        const documentoExistente = await tx.utilizador.findUnique({
+          where: { documentoNumero: input.documentoNumero },
+        });
+        if (documentoExistente) {
+          throw new DocumentoJaExisteError("Já existe uma conta registada com este número de documento.");
+        }
+      }
+
+      let direcaoId: string | undefined;
+      if (input.direcaoSigla) {
+        const direcao = await tx.direcao.findUnique({
+          where: { municipioId_sigla: { municipioId: input.municipioId, sigla: input.direcaoSigla } },
+          select: { id: true },
+        });
+        if (!direcao) {
+          throw new DirecaoNaoEncontradaError(
+            `A direcção "${input.direcaoSigla}" não existe neste município.`
+          );
+        }
+        direcaoId = direcao.id;
+      }
+
+      const utilizadorCriado = await tx.utilizador.create({
+        data: {
+          municipioId: input.municipioId,
+          nomeCompleto: input.nomeCompleto,
+          email: input.email,
+          passwordHash,
+          tipoConta: input.tipoConta,
+          ...(direcaoId !== undefined && { direcaoId }),
+          emailConfirmado: !exigeConfirmacaoEmail,
+          ...(input.areaResponsabilidade !== undefined && { areaResponsabilidade: input.areaResponsabilidade }),
+          ...(input.telefone !== undefined && { telefone: input.telefone }),
+          ...(input.endereco !== undefined && { endereco: input.endereco }),
+          ...(input.documentoTipo !== undefined && { documentoTipo: input.documentoTipo }),
+          ...(input.documentoNumero !== undefined && { documentoNumero: input.documentoNumero }),
+          ...(input.nomeEmpresa !== undefined && { nomeEmpresa: input.nomeEmpresa }),
+          ...(input.nifEmpresa !== undefined && { nifEmpresa: input.nifEmpresa }),
+          ...(input.nomeInstituicao !== undefined && { nomeInstituicao: input.nomeInstituicao }),
+          ...(input.nipcInstituicao !== undefined && { nipcInstituicao: input.nipcInstituicao }),
+          ...(input.nomeComissao !== undefined && { nomeComissao: input.nomeComissao }),
+          ...(input.bairroZona !== undefined && { bairroZona: input.bairroZona }),
+        },
+      });
+
+      const perfilCorrespondente = await tx.perfil.findFirst({
+        where: { nome: input.tipoConta, activo: true },
+        select: { id: true },
+      });
+      if (perfilCorrespondente) {
+        await tx.utilizadorPerfil.create({
+          data: { utilizadorId: utilizadorCriado.id, perfilId: perfilCorrespondente.id },
+        });
+      } else {
+        console.error(
+          `Perfil "${input.tipoConta}" não encontrado no catálogo, a conta ${utilizadorCriado.id} ficou sem permissões.`
+        );
+      }
+
+      await tx.logAuditoria.create({
+        data: {
+          municipioId: input.municipioId,
+          utilizadorId: utilizadorCriado.id,
+          accao: "REGISTO_CONTA",
+          entidade: "Utilizador",
+          entidadeId: utilizadorCriado.id,
+        },
+      });
+
+      let nomeMunicipio: string | undefined;
+      if (exigeConfirmacaoEmail) {
+        const municipio = await tx.municipio.findUniqueOrThrow({
+          where: { id: input.municipioId },
+          select: { nome: true },
+        });
+        nomeMunicipio = municipio.nome;
+      }
+
+      return { utilizador: utilizadorCriado, municipioNome: nomeMunicipio };
     }
-  }
+  );
 
-  await prismaAuthBypass.logAuditoria.create({
-    data: {
-      municipioId: input.municipioId,
-      utilizadorId: utilizador.id,
-      accao: "REGISTO_CONTA",
-      entidade: "Utilizador",
-      entidadeId: utilizador.id,
-    },
-  });
-
-  if (exigeConfirmacaoEmail) {
-    const municipio = await prismaAuthBypass.municipio.findUniqueOrThrow({
-      where: { id: input.municipioId },
-      select: { nome: true },
-    });
-    await enviarEmailDeConfirmacao(utilizador.id, utilizador.email, utilizador.nomeCompleto, municipio.nome);
+  // Envio de email fica FORA da transação: é I/O externo, não deve
+  // segurar a ligação à base de dados nem fazer rollback do registo
+  // se o envio falhar (o erro já é tratado internamente e só logado).
+  if (exigeConfirmacaoEmail && municipioNome) {
+    await enviarEmailDeConfirmacao(utilizador.id, utilizador.email, utilizador.nomeCompleto, municipioNome);
   }
 
   return utilizador;
@@ -149,9 +165,11 @@ async function enviarEmailDeConfirmacao(
     Date.now() + env.EMAIL_CONFIRMATION_EXPIRES_IN_HOURS * 60 * 60 * 1000
   );
 
-  await prismaAuthBypass.emailConfirmationToken.create({
-    data: { utilizadorId, tokenHash, expiraEm },
-  });
+  await withAuthBypass((tx: Prisma.TransactionClient) =>
+    tx.emailConfirmationToken.create({
+      data: { utilizadorId, tokenHash, expiraEm },
+    })
+  );
 
   const confirmationUrl = `${env.FRONTEND_URL}/confirmar-email?token=${rawToken}`;
   try {
@@ -170,45 +188,43 @@ async function enviarEmailDeConfirmacao(
 export async function confirmEmail(rawToken: string): Promise<void> {
   const tokenHash = hashToken(rawToken);
 
-  const tokenRecord = await prismaAuthBypass.emailConfirmationToken.findUnique({
-    where: { tokenHash },
-  });
+  await withAuthBypass(async (tx: Prisma.TransactionClient) => {
+    const tokenRecord = await tx.emailConfirmationToken.findUnique({
+      where: { tokenHash },
+    });
 
-  if (!tokenRecord) {
-    throw new TokenConfirmacaoInvalidoError("Token de confirmação inválido.");
-  }
+    if (!tokenRecord) {
+      throw new TokenConfirmacaoInvalidoError("Token de confirmação inválido.");
+    }
+    if (tokenRecord.usadoEm) {
+      throw new TokenConfirmacaoInvalidoError("Este link de confirmação já foi usado.");
+    }
+    if (tokenRecord.expiraEm < new Date()) {
+      throw new TokenConfirmacaoInvalidoError("Este link de confirmação expirou.");
+    }
 
-  if (tokenRecord.usadoEm) {
-    throw new TokenConfirmacaoInvalidoError("Este link de confirmação já foi usado.");
-  }
-
-  if (tokenRecord.expiraEm < new Date()) {
-    throw new TokenConfirmacaoInvalidoError("Este link de confirmação expirou.");
-  }
-
-  await prismaAuthBypass.$transaction([
-    prismaAuthBypass.emailConfirmationToken.update({
+    await tx.emailConfirmationToken.update({
       where: { id: tokenRecord.id },
       data: { usadoEm: new Date() },
-    }),
-    prismaAuthBypass.utilizador.update({
+    });
+    await tx.utilizador.update({
       where: { id: tokenRecord.utilizadorId },
       data: { emailConfirmado: true, emailConfirmadoEm: new Date() },
-    }),
-  ]);
+    });
 
-  const utilizador = await prismaAuthBypass.utilizador.findUniqueOrThrow({
-    where: { id: tokenRecord.utilizadorId },
-  });
+    const utilizador = await tx.utilizador.findUniqueOrThrow({
+      where: { id: tokenRecord.utilizadorId },
+    });
 
-  await prismaAuthBypass.logAuditoria.create({
-    data: {
-      municipioId: utilizador.municipioId,
-      utilizadorId: utilizador.id,
-      accao: "EMAIL_CONFIRMADO",
-      entidade: "Utilizador",
-      entidadeId: utilizador.id,
-    },
+    await tx.logAuditoria.create({
+      data: {
+        municipioId: utilizador.municipioId,
+        utilizadorId: utilizador.id,
+        accao: "EMAIL_CONFIRMADO",
+        entidade: "Utilizador",
+        entidadeId: utilizador.id,
+      },
+    });
   });
 }
 
@@ -230,18 +246,25 @@ export async function loginUser(
   input: LoginInput,
   context: { ipOrigem?: string; userAgent?: string }
 ): Promise<LoginResult> {
+  // Encontrar o utilizador pelo identificador PRECISA de ignorar RLS:
+  // ainda não sabemos o municipioId dele (é isso que estamos a
+  // descobrir), por isso não há como usar withTenantTransaction aqui.
+  // Mantém-se o readOnlyComRetry à volta, como no código original,
+  // para tolerar falhas transitórias de ligação neste ponto crítico.
   const utilizador = await readOnlyComRetry(
     () =>
-      prismaAuthBypass.utilizador.findFirst({
-        where: {
-          OR: [
-            { email: input.identificador },
-            { documentoNumero: input.identificador },
-            { nifEmpresa: input.identificador },
-            { nipcInstituicao: input.identificador },
-          ],
-        },
-      }),
+      withAuthBypass((tx: Prisma.TransactionClient) =>
+        tx.utilizador.findFirst({
+          where: {
+            OR: [
+              { email: input.identificador },
+              { documentoNumero: input.identificador },
+              { nifEmpresa: input.identificador },
+              { nipcInstituicao: input.identificador },
+            ],
+          },
+        })
+      ),
     "loginUser: procurar utilizador por identificador"
   );
 
@@ -262,10 +285,12 @@ export async function loginUser(
   const bloqueioJaExpirou = utilizador.bloqueadoAte !== null;
 
   if (bloqueioJaExpirou) {
-    await prismaAuthBypass.utilizador.update({
-      where: { id: utilizador.id },
-      data: { tentativasLoginFalhadas: 0, bloqueadoAte: null },
-    });
+    await withAuthBypass((tx: Prisma.TransactionClient) =>
+      tx.utilizador.update({
+        where: { id: utilizador.id },
+        data: { tentativasLoginFalhadas: 0, bloqueadoAte: null },
+      })
+    );
     utilizador.tentativasLoginFalhadas = 0;
     utilizador.bloqueadoAte = null;
   }
@@ -332,16 +357,18 @@ export async function loginUser(
       ...(context.ipOrigem !== undefined && { ipOrigem: context.ipOrigem }),
       ...(context.userAgent !== undefined && { userAgent: context.userAgent }),
     }),
-    prismaAuthBypass.logAuditoria.create({
-      data: {
-        municipioId: utilizador.municipioId,
-        utilizadorId: utilizador.id,
-        accao: "LOGIN_SUCESSO",
-        entidade: "Utilizador",
-        entidadeId: utilizador.id,
-        ...(context.ipOrigem !== undefined && { ipOrigem: context.ipOrigem }),
-      },
-    }),
+    withAuthBypass((tx: Prisma.TransactionClient) =>
+      tx.logAuditoria.create({
+        data: {
+          municipioId: utilizador.municipioId,
+          utilizadorId: utilizador.id,
+          accao: "LOGIN_SUCESSO",
+          entidade: "Utilizador",
+          entidadeId: utilizador.id,
+          ...(context.ipOrigem !== undefined && { ipOrigem: context.ipOrigem }),
+        },
+      })
+    ),
   ]);
 
   return {
@@ -372,30 +399,36 @@ async function registarTentativaFalhada(params: {
   const dataHoraBloqueio = new Date();
   const bloqueadoAte = new Date(dataHoraBloqueio.getTime() + DURACAO_BLOQUEIO_MS);
 
-  const utilizador = await prismaAuthBypass.utilizador.update({
-    where: { id: params.utilizadorId },
-    data: {
-      tentativasLoginFalhadas: novasTentativas,
-      ...(atingiuLimite && { bloqueadoAte }),
-    },
-  });
+  const utilizador = await withAuthBypass(async (tx: Prisma.TransactionClient) => {
+    const actualizado = await tx.utilizador.update({
+      where: { id: params.utilizadorId },
+      data: {
+        tentativasLoginFalhadas: novasTentativas,
+        ...(atingiuLimite && { bloqueadoAte }),
+      },
+    });
 
-  await prismaAuthBypass.logAuditoria.create({
-    data: {
-      municipioId: utilizador.municipioId,
-      utilizadorId: utilizador.id,
-      accao: atingiuLimite ? "CONTA_BLOQUEADA_FORCA_BRUTA" : "LOGIN_FALHADO",
-      entidade: "Utilizador",
-      entidadeId: utilizador.id,
-    },
+    await tx.logAuditoria.create({
+      data: {
+        municipioId: actualizado.municipioId,
+        utilizadorId: actualizado.id,
+        accao: atingiuLimite ? "CONTA_BLOQUEADA_FORCA_BRUTA" : "LOGIN_FALHADO",
+        entidade: "Utilizador",
+        entidadeId: actualizado.id,
+      },
+    });
+
+    return actualizado;
   });
 
   if (atingiuLimite && params.emailConfirmado) {
     try {
-      const municipio = await prismaAuthBypass.municipio.findUniqueOrThrow({
-        where: { id: utilizador.municipioId },
-        select: { nome: true },
-      });
+      const municipio = await withAuthBypass((tx: Prisma.TransactionClient) =>
+        tx.municipio.findUniqueOrThrow({
+          where: { id: utilizador.municipioId },
+          select: { nome: true },
+        })
+      );
       await sendContaBloqueadaEmail({
         to: params.email,
         toName: params.nomeCompleto,
@@ -473,80 +506,104 @@ export type PasswordResetRequestResult =
   | { estado: "CONTA_NAO_ENCONTRADA" }
   | { estado: "CONTA_NAO_ELEGIVEL" }
   | { estado: "EMAIL_ENVIADO" };
+type ResultadoInternoPasswordReset =
+  | { estado: "CONTA_NAO_ENCONTRADA" }
+  | { estado: "CONTA_NAO_ELEGIVEL" }
+  | {
+      estado: "EMAIL_ENVIADO";
+      utilizador: { id: string; email: string; nomeCompleto: string; municipioId: string };
+      rawToken: string;
+    };
 
 export async function requestPasswordReset(email: string): Promise<PasswordResetRequestResult> {
-  const utilizador = await prismaAuthBypass.utilizador.findUnique({ where: { email } });
+  const resultado = await withAuthBypass<ResultadoInternoPasswordReset>(
+    async (tx: Prisma.TransactionClient) => {
+      const utilizador = await tx.utilizador.findUnique({ where: { email } });
 
-  if (!utilizador) {
-    return { estado: "CONTA_NAO_ENCONTRADA" };
-  }
+      if (!utilizador) {
+        return { estado: "CONTA_NAO_ENCONTRADA" };
+      }
 
-  if (!(TIPOS_COM_RECOVERY_DE_PASSWORD as readonly string[]).includes(utilizador.tipoConta)) {
-    // Contas INTERNO não usam recovery por email — são redefinidas pelo
-    // Administrador Municipal/RH via POST /utilizadores/:id/redefinir-password.
-    return { estado: "CONTA_NAO_ELEGIVEL" };
-  }
+      if (!(TIPOS_COM_RECOVERY_DE_PASSWORD as readonly string[]).includes(utilizador.tipoConta)) {
+        // Contas INTERNO não usam recovery por email — são redefinidas pelo
+        // Administrador Municipal/RH via POST /utilizadores/:id/redefinir-password.
+        return { estado: "CONTA_NAO_ELEGIVEL" };
+      }
 
-  const rawToken = randomBytes(32).toString("hex");
-  const tokenHash = hashToken(rawToken);
-  const expiraEm = new Date(Date.now() + env.PASSWORD_RESET_EXPIRES_IN_HOURS * 60 * 60 * 1000);
+      const rawToken = randomBytes(32).toString("hex");
+      const tokenHash = hashToken(rawToken);
+      const expiraEm = new Date(Date.now() + env.PASSWORD_RESET_EXPIRES_IN_HOURS * 60 * 60 * 1000);
 
-  await prismaAuthBypass.passwordResetToken.create({
-    data: { utilizadorId: utilizador.id, tokenHash, expiraEm },
-  });
+      await tx.passwordResetToken.create({
+        data: { utilizadorId: utilizador.id, tokenHash, expiraEm },
+      });
 
-  const resetUrl = `${env.FRONTEND_URL}/redefinir-password?token=${rawToken}`;
-  prismaAuthBypass.municipio
-    .findUniqueOrThrow({ where: { id: utilizador.municipioId }, select: { nome: true } })
-    .then((municipio) =>
-      sendPasswordResetEmail({
-        to: utilizador.email,
-        toName: utilizador.nomeCompleto,
-        municipioNome: municipio.nome,
-        resetUrl,
-        expiresInHours: env.PASSWORD_RESET_EXPIRES_IN_HOURS,
+      await tx.logAuditoria.create({
+        data: {
+          municipioId: utilizador.municipioId,
+          utilizadorId: utilizador.id,
+          accao: "PASSWORD_RECOVERY_SOLICITADO",
+          entidade: "Utilizador",
+          entidadeId: utilizador.id,
+        },
+      });
+
+      return { estado: "EMAIL_ENVIADO", utilizador, rawToken };
+    }
+  );
+
+  if (resultado.estado === "EMAIL_ENVIADO") {
+    const resetUrl = `${env.FRONTEND_URL}/redefinir-password?token=${resultado.rawToken}`;
+
+    // Tipo explícito do genérico + anotação dos parâmetros do
+    // .then/.catch: a cadeia de promises aqui não dá ao TS informação
+    // suficiente para inferir o tipo através de withAuthBypass, por
+    // isso anotamos "à mão" em vez de depender de inferência.
+    withAuthBypass<{ nome: string }>((tx: Prisma.TransactionClient) =>
+      tx.municipio.findUniqueOrThrow({
+        where: { id: resultado.utilizador.municipioId },
+        select: { nome: true },
       })
     )
-    .catch((error) => {
-      console.error("Falha ao enviar email de recuperação de password:", error);
-    });
+      .then((municipio: { nome: string }) =>
+        sendPasswordResetEmail({
+          to: resultado.utilizador.email,
+          toName: resultado.utilizador.nomeCompleto,
+          municipioNome: municipio.nome,
+          resetUrl,
+          expiresInHours: env.PASSWORD_RESET_EXPIRES_IN_HOURS,
+        })
+      )
+      .catch((error: unknown) => {
+        console.error("Falha ao enviar email de recuperação de password:", error);
+      });
+  }
 
-  await prismaAuthBypass.logAuditoria.create({
-    data: {
-      municipioId: utilizador.municipioId,
-      utilizadorId: utilizador.id,
-      accao: "PASSWORD_RECOVERY_SOLICITADO",
-      entidade: "Utilizador",
-      entidadeId: utilizador.id,
-    },
-  });
-
-  return { estado: "EMAIL_ENVIADO" };
+  return { estado: resultado.estado };
 }
 
 export async function resetPassword(rawToken: string, novaPassword: string): Promise<void> {
   const tokenHash = hashToken(rawToken);
-
-  const tokenRecord = await prismaAuthBypass.passwordResetToken.findUnique({ where: { tokenHash } });
-
-  if (!tokenRecord) {
-    throw new TokenRedefinicaoInvalidoError("Token de redefinição inválido.");
-  }
-  if (tokenRecord.usadoEm) {
-    throw new TokenRedefinicaoInvalidoError("Este link de redefinição já foi usado.");
-  }
-  if (tokenRecord.expiraEm < new Date()) {
-    throw new TokenRedefinicaoInvalidoError("Este link de redefinição expirou. Pede um novo.");
-  }
-
   const passwordHash = await hashPassword(novaPassword);
 
-  await prismaAuthBypass.$transaction([
-    prismaAuthBypass.passwordResetToken.update({
+  await withAuthBypass(async (tx: Prisma.TransactionClient) => {
+    const tokenRecord = await tx.passwordResetToken.findUnique({ where: { tokenHash } });
+
+    if (!tokenRecord) {
+      throw new TokenRedefinicaoInvalidoError("Token de redefinição inválido.");
+    }
+    if (tokenRecord.usadoEm) {
+      throw new TokenRedefinicaoInvalidoError("Este link de redefinição já foi usado.");
+    }
+    if (tokenRecord.expiraEm < new Date()) {
+      throw new TokenRedefinicaoInvalidoError("Este link de redefinição expirou. Pede um novo.");
+    }
+
+    await tx.passwordResetToken.update({
       where: { id: tokenRecord.id },
       data: { usadoEm: new Date() },
-    }),
-    prismaAuthBypass.utilizador.update({
+    });
+    await tx.utilizador.update({
       where: { id: tokenRecord.utilizadorId },
       data: {
         passwordHash,
@@ -554,24 +611,24 @@ export async function resetPassword(rawToken: string, novaPassword: string): Pro
         tentativasLoginFalhadas: 0,
         bloqueadoAte: null,
       },
-    }),
-    prismaAuthBypass.refreshToken.updateMany({
+    });
+    await tx.refreshToken.updateMany({
       where: { utilizadorId: tokenRecord.utilizadorId, revogadoEm: null },
       data: { revogadoEm: new Date() },
-    }),
-  ]);
+    });
 
-  const utilizador = await prismaAuthBypass.utilizador.findUniqueOrThrow({
-    where: { id: tokenRecord.utilizadorId },
-  });
+    const utilizador = await tx.utilizador.findUniqueOrThrow({
+      where: { id: tokenRecord.utilizadorId },
+    });
 
-  await prismaAuthBypass.logAuditoria.create({
-    data: {
-      municipioId: utilizador.municipioId,
-      utilizadorId: utilizador.id,
-      accao: "PASSWORD_REDEFINIDA_POR_RECOVERY",
-      entidade: "Utilizador",
-      entidadeId: utilizador.id,
-    },
+    await tx.logAuditoria.create({
+      data: {
+        municipioId: utilizador.municipioId,
+        utilizadorId: utilizador.id,
+        accao: "PASSWORD_REDEFINIDA_POR_RECOVERY",
+        entidade: "Utilizador",
+        entidadeId: utilizador.id,
+      },
+    });
   });
 }
