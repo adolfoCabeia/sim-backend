@@ -210,29 +210,33 @@ export async function refreshController(
   reply: FastifyReply
 ) {
   try {
-    const refreshToken = request.cookies.refreshToken || request.body.refreshToken;
+    const refreshToken =
+      request.cookies.refreshToken || request.body.refreshToken;
 
     if (!refreshToken) {
       return reply.status(401).send({
         success: false,
-        message: "Refresh token não encontrado."
+        message: "Refresh token não encontrado.",
       });
     }
 
-    const { novoRefreshToken, utilizadorId } = await rotateRefreshToken(
-      refreshToken,
-      {
+    const { novoRefreshToken, utilizadorId } =
+      await rotateRefreshToken(refreshToken, {
         ipOrigem: request.ip,
         ...(request.headers["user-agent"] !== undefined && {
           userAgent: request.headers["user-agent"],
         }),
-      }
-    );
+      });
 
-    const utilizador = await prismaAuthBypass.utilizador.findUniqueOrThrow({
-      where: { id: utilizadorId },
-      select: { municipioId: true, tipoConta: true, deveTrocarPassword: true },
-    });
+    const utilizador =
+      await prismaAuthBypass.utilizador.findUniqueOrThrow({
+        where: { id: utilizadorId },
+        select: {
+          municipioId: true,
+          tipoConta: true,
+          deveTrocarPassword: true,
+        },
+      });
 
     const accessToken = await reply.jwtSign({
       sub: utilizadorId,
@@ -241,7 +245,11 @@ export async function refreshController(
       deveTrocarPassword: utilizador.deveTrocarPassword,
     });
 
-    reply.setCookie("refreshToken", novoRefreshToken, REFRESH_TOKEN_COOKIE_OPTIONS);
+    reply.setCookie(
+      "refreshToken",
+      novoRefreshToken,
+      REFRESH_TOKEN_COOKIE_OPTIONS
+    );
 
     return reply.send({
       success: true,
@@ -250,17 +258,30 @@ export async function refreshController(
   } catch (error) {
     if (error instanceof RefreshTokenReutilizadoError) {
       reply.clearCookie("refreshToken");
-      return reply
-        .status(401)
-        .send({ success: false, message: error.message, code: "TOKEN_REUTILIZADO" });
+
+      return reply.status(401).send({
+        success: false,
+        message: error.message,
+        code: "TOKEN_REUTILIZADO",
+      });
     }
+
     if (error instanceof RefreshTokenInvalidoError) {
-      return reply.status(401).send({ success: false, message: error.message });
+      return reply.status(401).send({
+        success: false,
+        message: error.message,
+      });
     }
-    request.log.error({ error }, "Erro inesperado ao renovar sessão");
-    return reply
-      .status(500)
-      .send({ success: false, message: "Erro interno ao renovar sessão." });
+
+    request.log.error(
+      { error },
+      "Erro inesperado ao renovar sessão"
+    );
+
+    return reply.status(500).send({
+      success: false,
+      message: "Erro interno ao renovar sessão.",
+    });
   }
 }
 
