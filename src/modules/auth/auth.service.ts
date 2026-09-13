@@ -351,25 +351,32 @@ export async function loginUser(
       throw new ForaDoHorarioDeAcessoError(MENSAGEM_FORA_DO_HORARIO_DE_ACESSO);
     }
   }
-  const [refreshToken] = await Promise.all([
-    issueRefreshToken({
-      utilizadorId: utilizador.id,
-      ...(context.ipOrigem !== undefined && { ipOrigem: context.ipOrigem }),
-      ...(context.userAgent !== undefined && { userAgent: context.userAgent }),
-    }),
-    withAuthBypass((tx: Prisma.TransactionClient) =>
-      tx.logAuditoria.create({
-        data: {
-          municipioId: utilizador.municipioId,
-          utilizadorId: utilizador.id,
-          accao: "LOGIN_SUCESSO",
-          entidade: "Utilizador",
-          entidadeId: utilizador.id,
-          ...(context.ipOrigem !== undefined && { ipOrigem: context.ipOrigem }),
-        },
-      })
-    ),
-  ]);
+ const refreshToken = await issueRefreshToken({
+  utilizadorId: utilizador.id,
+  ...(context.ipOrigem !== undefined && {
+    ipOrigem: context.ipOrigem,
+  }),
+  ...(context.userAgent !== undefined && {
+    userAgent: context.userAgent,
+  }),
+});
+
+await withTenantTransaction(
+  utilizador.municipioId,
+  (tx: Prisma.TransactionClient) =>
+    tx.logAuditoria.create({
+      data: {
+        municipioId: utilizador.municipioId,
+        utilizadorId: utilizador.id,
+        accao: "LOGIN_SUCESSO",
+        entidade: "Utilizador",
+        entidadeId: utilizador.id,
+        ...(context.ipOrigem !== undefined && {
+          ipOrigem: context.ipOrigem,
+        }),
+      },
+    })
+);
 
   return {
     utilizador: {

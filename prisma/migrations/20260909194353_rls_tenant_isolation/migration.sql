@@ -1,31 +1,3 @@
-ALTER TABLE utilizadores ENABLE ROW LEVEL SECURITY;
-ALTER TABLE utilizadores FORCE ROW LEVEL SECURITY;
-
-DROP POLICY IF EXISTS tenant_isolation_utilizadores ON utilizadores;
-
-CREATE POLICY tenant_isolation_utilizadores
-ON utilizadores
-USING (
-    "municipioId" = current_setting('app.current_municipio_id', true)
-)
-WITH CHECK (
-    "municipioId" = current_setting('app.current_municipio_id', true)
-);
-
-ALTER TABLE direcoes ENABLE ROW LEVEL SECURITY;
-ALTER TABLE direcoes FORCE ROW LEVEL SECURITY;
-
-DROP POLICY IF EXISTS tenant_isolation_direcoes ON direcoes;
-
-CREATE POLICY tenant_isolation_direcoes
-ON direcoes
-USING (
-    "municipioId" = current_setting('app.current_municipio_id', true)
-)
-WITH CHECK (
-    "municipioId" = current_setting('app.current_municipio_id', true)
-);
-
 ALTER TABLE logs_auditoria ENABLE ROW LEVEL SECURITY;
 ALTER TABLE logs_auditoria FORCE ROW LEVEL SECURITY;
 
@@ -563,33 +535,6 @@ USING (
 WITH CHECK (
     "municipioId" =
         current_setting('app.current_municipio_id', true)
-);
-
-ALTER TABLE departamentos ENABLE ROW LEVEL SECURITY;
-ALTER TABLE departamentos FORCE ROW LEVEL SECURITY;
-
-DROP POLICY IF EXISTS tenant_isolation_departamentos
-ON departamentos;
-
-CREATE POLICY tenant_isolation_departamentos
-ON departamentos
-USING (
-    EXISTS (
-        SELECT 1
-        FROM direcoes d
-        WHERE d.id = "direcaoId"
-          AND d."municipioId" =
-              current_setting('app.current_municipio_id', true)
-    )
-)
-WITH CHECK (
-    EXISTS (
-        SELECT 1
-        FROM direcoes d
-        WHERE d.id = "direcaoId"
-          AND d."municipioId" =
-              current_setting('app.current_municipio_id', true)
-    )
 );
 
 ALTER TABLE "PedidoFerias" ENABLE ROW LEVEL SECURITY;
