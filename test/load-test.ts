@@ -26,7 +26,7 @@
  * workers em background (alertas-operacionais, process-engine).
  */
 
-import autocannon from "  ";
+import autocannon from "autocannon";
 
 const BASE_URL = process.env.LOAD_TEST_BASE_URL ?? "http://localhost:3000";
 const DURATION = Number(process.env.LOAD_TEST_DURATION ?? 15);
@@ -110,14 +110,21 @@ async function main() {
   console.log(`Teste de carga SIM-VIANA`);
   console.log(`Alvo: ${BASE_URL}  |  Duração/cenário: ${DURATION}s  |  Ligações: ${CONNECTIONS}`);
 
-  // ── Cenário 1: endpoint público, sem BD (baseline do próprio Fastify) ──
-  await correrCenario("Cenário 1 — GET /health (baseline, sem BD)", {
+  // ── Cenário 1: /health (SELECT 1 na BD; isento de rate limit) ──
+  await correrCenario("Cenário 1 — GET /health (SELECT 1 na BD, isento de rate limit)", {
     requests: [{ method: "GET", path: "/health" }],
   });
 
   // ── Cenário 2: login sob carga (bcrypt + BD — tipicamente o mais pesado) ──
+  // NOTA: autentica-se primeiro (fora do autocannon) antes de inundar o
+  // próprio endpoint de login — /auth/login tem rate limit apertado por
+  // desenho (protecção de força bruta, ver auth.routes.ts), por isso
+  // inundá-lo primeiro esgotava o limite e impedia a autenticação usada
+  // pelos cenários 3/4 a seguir.
+  const token = await autenticar();
+
   if (EMAIL && PASSWORD) {
-    await correrCenario("Cenário 2 — POST /auth/login (bcrypt + BD)", {
+    await correrCenario("Cenário 2 — POST /auth/login (bcrypt + BD; espera-se saturar o rate limit de força bruta)", {
       connections: Math.min(CONNECTIONS, 10), // bcrypt é caro de propósito — não exagerar aqui
       requests: [
         {
@@ -131,7 +138,6 @@ async function main() {
   }
 
   // ── Cenário 3: rotas autenticadas típicas, com token real ──
-  const token = await autenticar();
   if (token) {
     const headers = { authorization: `Bearer ${token}` };
 

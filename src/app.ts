@@ -42,11 +42,23 @@ import { direcoesRoutes } from "./modules/direcoes/direcoes.routes.js";
 import { conteudoPublicoRoutes } from "./modules/conteudo-publico/conteudo-publico.route.js";
 import { contactosInstitucionaisRoutes } from "./modules/contactos/contacto.route.js";
 import { logisticaRoutes } from "./modules/logistica/logistica.routes.js";
+// ACHADO DE AUDITORIA: stockRoutes existia (itens, movimentos, alertas de
+// reposição — secção 8.3.3 da especificação) mas nunca era registado em
+// nenhum lado da app. Toda a API REST de Stock/Economato estava
+// inacessível (404 em todos os endpoints), apesar do código, serviço e
+// testes de carga já assumirem que existia. Confirmado com teste de
+// carga real: GET /stock/alertas e POST /stock/movimentos devolviam 404
+// a 100% dos pedidos antes desta correcção.
+import { stockRoutes } from "./modules/stock/stock.routes.js";
 import { patrimonioRoutes } from "./modules/patrimonios/patrimonio.routes.js";
 import { rbacRoutes } from "./modules/auth/rbac/rbac.route.js";
 import { servicosContinuosRoutes } from "./modules/servicos-continuos/servicos-continuos.routes.js";
 import { manutencaoRoutes } from "./modules/manuntencao/manutencao.routes.js";
 import { servicosRoutes } from "./modules/servicos/servico.route.js";
+// ACHADO DE AUDITORIA: mesmo padrão — dashboard de pagamentos por
+// serviço (resumo, comparação, evolução, ranking, por direcção) escrito
+// por completo, nunca registado.
+import { servicosDashboardRoutes } from "./modules/servicos/servico.dashboard.route.js";
 import { funcionariosRoutes } from "./modules/rh/funcionarios/funcionario.route.js";
 import { feriasRoutes } from "./modules/rh/ferias/ferias.route.js";
 import { pontoRoutes } from "./modules/rh/ponto/ponto.route.js"; 
@@ -64,6 +76,14 @@ import { centrosRoutes } from "./modules/acao-social/centros/centro.route.js";
 import { casosSensiveisRoutes } from "./modules/acao-social/casos-sensiveis/caso-sensivel.route.js";
 import { programasRoutes } from "./modules/acao-social/programas/programa.route.js";
 import { pedidosApoioRoutes } from "./modules/acao-social/pedidos-apoio/pedido-apoio.route.js";
+// ACHADO DE AUDITORIA: tal como stockRoutes, esta rota existia por
+// completo (listar/criar distribuição de kits de cesta básica — secção
+// 12 da especificação) mas nunca era registada — 404 em todos os
+// endpoints. Confirmado com a mesma verificação sistemática que
+// encontrou o gap do Stock: comparei todos os `export async function
+// *Routes` do projecto contra as chamadas `app.register(...)` deste
+// ficheiro.
+import { distribuicaoKitRoutes } from "./modules/acao-social/distribuicao-kits/distribuicao-kit.route.js";
 import { indicadoresRoutes } from "./modules/acao-social/indicadores/indicadores.route.js";
 import { auditoriaRoutes } from "./modules/auditoria/auditoria.route.js";
 import { receitasRoutes } from "./modules/receitas/receita.route.js";
@@ -76,6 +96,15 @@ export async function buildApp() {
     logger: true,
     trustProxy: true,
     genReqId: () => randomUUID(),
+    // ACHADO DE AUDITORIA: 10s (omissão do Fastify) é pouco para o
+    // arranque completo desta app (~50 plugins/módulos de rotas
+    // registados sincronamente) em máquinas mais lentas — reportado a
+    // estourar em Windows com `tsx watch`. A correcção principal foi
+    // deixar de bloquear plugins em I/O de rede durante o registo (ver
+    // redis.ts); isto é margem de segurança adicional, não a correcção
+    // em si — um plugin genuinamente preso continua a ser apanhado,
+    // só que aos 30s em vez de aos 10s.
+    pluginTimeout: 30_000,
     ajv: {
       customOptions: {
         strict: false,
@@ -114,8 +143,26 @@ export async function buildApp() {
     permittedCrossDomainPolicies: { permittedPolicies: "none" },
   });
 
+  // ACHADO DE AUDITORIA (confirmado com teste de carga real, autocannon,
+  // 20 ligações concorrentes, 8s): com max:100/min aplicado globalmente
+  // e sem excepção para /health, 22044 de 22142 pedidos a /health
+  // (99.6%) receberam 429 — não por sobrecarga real do servidor, mas
+  // porque o rate limit é contado por IP, e este ambiente municipal tem
+  // dezenas de funcionários atrás do mesmo NAT/proxy de rede
+  // institucional (ver secção 21 da especificação). Um load balancer ou
+  // Kubernetes a fazer liveness/readiness probe ao /health também
+  // esgotaria este limite sozinho. Corrigido: /health fica isento (não
+  // é uma superfície de abuso, e se falhar sob carga legítima o
+  // orquestrador pode reiniciar a instância exactamente quando está a
+  // servir tráfego real — o pior momento possível). O tecto global subiu
+  // de 100 para 300/min — as rotas sensíveis (login, reset de password,
+  // etc.) já têm os seus próprios limites mais apertados por rota (ver
+  // auth.routes.ts, ex.: 5/15min) e continuam a valer independentemente
+  // deste valor global. 300/min por IP ainda é uma estimativa de
+  // partida, não um número validado com tráfego de produção real —
+  // recomenda-se reavaliar com métricas reais após o piloto em Viana.
   await app.register(rateLimit, {
-    max: 100,
+    max: 300,
     timeWindow: "1 minute",
   });
   await app.register(compress, { global: true });
@@ -165,6 +212,7 @@ await app.register(rbacRoutes, { prefix: "/rbac" });
   await app.register(conteudoPublicoRoutes);
   await app.register(contactosInstitucionaisRoutes);
   await app.register(logisticaRoutes, { prefix: "/logistica" })
+  await app.register(stockRoutes, { prefix: "/stock" })
   await app.register(patrimonioRoutes, { prefix: "/patrimonio" })
   await app.register(manutencaoRoutes)
   await app.register(funcionariosRoutes)
@@ -186,30 +234,37 @@ await app.register(rbacRoutes, { prefix: "/rbac" });
   await app.register(casosSensiveisRoutes)
   await app.register(programasRoutes)
   await app.register(pedidosApoioRoutes)
+  await app.register(distribuicaoKitRoutes)
   await app.register(indicadoresRoutes)
   await app.register(receitasRoutes)
   await app.register(servicosRoutes)
+  await app.register(servicosDashboardRoutes)
 
-  app.get("/health", async (_, reply) => {
-    try {
-      await prisma.$queryRaw`SELECT 1`;
+  app.get(
+    "/health",
+    // Isento de rate limit — ver nota junto ao registo do plugin em cima.
+    { config: { rateLimit: false } },
+    async (_, reply) => {
+      try {
+        await prisma.$queryRaw`SELECT 1`;
 
-      return reply.send({
-        status: "ok",
-        timestamp: new Date().toISOString(),
-      });
-    } catch (error) {
-      app.log.error(
-        { error },
-        "Healthcheck falhou"
-      );
+        return reply.send({
+          status: "ok",
+          timestamp: new Date().toISOString(),
+        });
+      } catch (error) {
+        app.log.error(
+          { error },
+          "Healthcheck falhou"
+        );
 
-      return reply.status(503).send({
-        status: "error",
-        reason: "database_unreachable",
-      });
+        return reply.status(503).send({
+          status: "error",
+          reason: "database_unreachable",
+        });
+      }
     }
-  });
+  );
   app.get("/", async () => {
     return {
       name: "SIM-VIANA API",

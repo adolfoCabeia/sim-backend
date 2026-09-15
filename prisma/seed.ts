@@ -9,21 +9,32 @@ import {
 } from "../src/generated/prisma/client.js";
 import { DIRECOES_TEMPLATE, DEPARTAMENTOS_POR_DIRECAO } from "../src/config/organograma.js";
 import { CATALOGO_SERVICOS_MUNICIPAIS } from "../src/config/catalogo-servicos.js";
+
+// ACHADO DE AUDITORIA: `ssl` estava sempre activo (necessário para o
+// Render em produção), o que quebra a ligação a um Postgres local sem
+// SSL (docker-compose de desenvolvimento) — "P1011: The server does
+// not support SSL connections". Este script usa `process.env`
+// directamente (não passa por src/config/env.ts), por isso a mesma
+// correcção aplicada em src/config/prisma.ts tem de ser repetida aqui
+// separadamente — são dois `Pool` completamente independentes.
+// Por omissão, SSL só liga quando NODE_ENV=production; pode ser forçado
+// com DATABASE_SSL=true/false em qualquer ambiente.
+const sslActivo = process.env.DATABASE_SSL !== undefined
+  ? process.env.DATABASE_SSL === "true"
+  : process.env.NODE_ENV === "production";
+
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL!,
   max: 1,
   connectionTimeoutMillis: 15_000,
   idleTimeoutMillis: 30_000,
   keepAlive: true,
-  ssl: {
-    rejectUnauthorized: false,
-  },
+  ssl: sslActivo ? { rejectUnauthorized: false } : false,
 });
 
 pool.on("connect", () => {
   console.log("🟢 PostgreSQL: conexão estabelecida");
 });
-
 pool.on("acquire", () => {
   console.log("🔵 PostgreSQL: conexão adquirida");
 });

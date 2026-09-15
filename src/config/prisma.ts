@@ -5,19 +5,31 @@ import { PrismaClient, Prisma } from "../generated/prisma/client.js";
 import { env, isDevelopment } from "./env.js";
 import { logger } from "./logger.js";
 
-function buildPoolConfig(connectionString: string): PoolConfig {
+// ACHADO DE AUDITORIA: `max` estava fixo em 5 (para o pool normal e,
+// separadamente, mais 5 para o pool de bypass). Sob ~5 pedidos
+// concorrentes (uma única página a carregar vários painéis), isto
+// esgota-se e causa "Connection terminated due to connection timeout"
+// e transacções interactivas a expirar (P2028) — reproduzido e
+// confirmado com dados reais. Agora configurável via variável de
+// ambiente, com um valor por omissão mais realista.
+// ACHADO DE AUDITORIA: `ssl` estava sempre activo (necessário para o
+// Render em produção), o que quebra a ligação a um Postgres local sem
+// SSL (ex.: o container postgres:16-alpine do docker-compose para
+// desenvolvimento) — "P1011: The server does not support SSL
+// connections". Agora é condicional: por omissão, SSL só liga fora de
+// desenvolvimento (produção/Render); pode ser forçado explicitamente
+// com DATABASE_SSL=true/false em qualquer ambiente.
+function buildPoolConfig(connectionString: string, max: number): PoolConfig {
   return {
     connectionString,
 
-    // Render PostgreSQL exige SSL.
-    // rejectUnauthorized=false é necessário porque
-    // estamos a usar a CA fornecida pelo serviço sem
-    // configurar uma CA local explicitamente.
-    ssl: {
-      rejectUnauthorized: false,
-    },
+    // Render PostgreSQL exige SSL; Postgres local (Docker, dev) não o
+    // suporta por omissão.
+    ssl: (env.DATABASE_SSL ?? !isDevelopment)
+      ? { rejectUnauthorized: false }
+      : false,
 
-    max: 5,
+    max,
     connectionTimeoutMillis: 5_000,
     idleTimeoutMillis: 30_000,
     statement_timeout: 15_000,
@@ -45,7 +57,7 @@ function onConnectionError(origem: string) {
 }
 
 const adapter = new PrismaPg(
-  buildPoolConfig(env.DATABASE_URL),
+  buildPoolConfig(env.DATABASE_URL, env.DATABASE_POOL_MAX),
   {
     onPoolError: onPoolError("prisma"),
     onConnectionError: onConnectionError("prisma"),
@@ -53,7 +65,7 @@ const adapter = new PrismaPg(
 );
 
 const authBypassAdapter = new PrismaPg(
-  buildPoolConfig(env.SEED_DATABASE_URL ?? env.DATABASE_URL),
+  buildPoolConfig(env.SEED_DATABASE_URL ?? env.DATABASE_URL, env.DATABASE_BYPASS_POOL_MAX),
   {
     onPoolError: onPoolError("prismaAuthBypass"),
     onConnectionError: onConnectionError("prismaAuthBypass"),
@@ -106,32 +118,15 @@ export async function withTenantTransaction<T>(
         )
       `;
 
-      const contextoRls = await tx.$queryRaw<
-        Array<{
-          municipioAtual: string | null;
-          superAdmin: string | null;
-        }>
-      >`
-        SELECT
-          current_setting(
-            'app.current_municipio_id',
-            true
-          ) AS "municipioAtual",
-
-          current_setting(
-            'app.is_super_admin',
-            true
-          ) AS "superAdmin"
-      `;
-
-      logger.info(
-        {
-          municipioIdRecebido: municipioId,
-          municipioAtualNoPostgres: contextoRls[0]?.municipioAtual ?? null,
-          isSuperAdmin: contextoRls[0]?.superAdmin ?? null,
-        },
-        "Contexto RLS configurado"
-      );
+      // ACHADO DE AUDITORIA: existia aqui uma segunda query
+      // (`contextoRls`, a reler current_setting logo a seguir a
+      // defini-lo) cujo resultado nunca era lido em lado nenhum —
+      // nem log, nem validação, nem devolvido. É uma ida-e-volta extra
+      // à base de dados, em TODAS as transacções da aplicação inteira,
+      // sem qualquer efeito. Removida. Se era usada para depuração
+      // manual, o mais barato é confirmar via `SELECT
+      // current_setting('app.current_municipio_id', true)` directamente
+      // no psql, não dentro do caminho quente de produção.
 
       return fn(tx);
     },
@@ -142,24 +137,6 @@ export async function withTenantTransaction<T>(
   );
 }
 
-/**
- * Corre `fn` dentro de uma transação com `app.is_super_admin` definido
- * a 'true' via set_config(..., true) — escopo LOCAL, válido só dentro
- * desta transação, nunca "vaza" para outras queries na mesma ligação
- * do pool.
- *
- * É o "bypass" real de RLS para os fluxos de autenticação (login,
- * registo, confirmação de email, recovery de password). Não depende
- * de BYPASSRLS nem de ownership da tabela porque `utilizadores` tem
- * FORCE ROW LEVEL SECURITY activo — nem o dono da tabela escapa às
- * policies sem isto.
- *
- * IMPORTANTE: só deve ser usado nos pontos onde a query genuinamente
- * precisa de ignorar o isolamento por município (ex: encontrar um
- * utilizador pelo email antes de sabermos o município dele). Nunca
- * use isto para listagens gerais de utilizadores — aí deve usar
- * withTenantTransaction.
- */
 export async function withAuthBypass<T>(
   fn: (tx: Prisma.TransactionClient) => Promise<T>,
   options?: {
@@ -267,7 +244,7 @@ export async function readOnlyComRetry<T>(
       const atrasoMs = atrasoBaseMs * 2 ** (tentativa - 1);
       logger.warn(
         { err: error, label, tentativa, tentativas, atrasoMs },
-        "Erro transitório de ligação à base de dados — a tentar novamente"
+        "Erro transitório de ligação à base de dados, a tentar novamente"
       );
       await new Promise((resolve) => setTimeout(resolve, atrasoMs));
     }

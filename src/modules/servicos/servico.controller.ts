@@ -1,6 +1,13 @@
 import type { FastifyRequest, FastifyReply } from "fastify";
 import * as service from "./servico.service.js";
-import type { CriarServicoInput, ActualizarServicoInput, ListarServicosQuery, ListarServicosPublicoQuery } from "./servico.schema.js";
+import type {
+  CriarServicoInput,
+  ActualizarServicoInput,
+  ListarServicosQuery,
+  ListarServicosPublicoQuery,
+  ObterServicoPublicoParams,
+  ObterServicoPublicoQuery,
+} from "./servico.schema.js";
 
 function tratarErro(request: FastifyRequest, reply: FastifyReply, error: unknown, contexto: string) {
   if (error instanceof service.ServicoNaoEncontradoError) {
@@ -105,17 +112,36 @@ export async function obterServicoController(request: FastifyRequest<{ Params: {
   }
 }
 
-/** Endpoint público (sem autenticação) — substitui /servicos-municipais estático. Como os
- * dados passaram a ser por município, é obrigatório indicar municipioId. */
+/** Endpoint público (sem autenticação) — devolve todos os serviços activos do município,
+ * sem paginação. municipioId é obrigatório e é o único critério de isolamento aqui, pois
+ * filtrarServicosCatalogo já força activo:true. */
 export async function listarServicosPublicoController(
   request: FastifyRequest<{ Querystring: ListarServicosPublicoQuery }>,
   reply: FastifyReply
 ) {
   try {
-    const { municipioId, ...query } = request.query;
-    const resultado = await service.listarServicos({ municipioId, query: { ...query, activo: true } });
-    return reply.send({ success: true, data: resultado.items });
+    const { municipioId, ...filtros } = request.query;
+    const cleanFiltros = Object.fromEntries(Object.entries(filtros).filter(([, v]) => v !== undefined));
+    const servicos = await service.filtrarServicosCatalogo({ municipioId, ...cleanFiltros });
+    return reply.send({ success: true, data: servicos.map(service.mapServicoParaPublicoResumo) });
   } catch (error) {
     return tratarErro(request, reply, error, "Erro ao listar catálogo público de serviços");
+  }
+}
+
+/** Endpoint público (sem autenticação) — detalhe de um serviço pelo código. Devolve 404
+ * se não existir, não pertencer ao município indicado ou estiver desactivado. */
+export async function obterServicoPublicoController(
+  request: FastifyRequest<{ Params: ObterServicoPublicoParams; Querystring: ObterServicoPublicoQuery }>,
+  reply: FastifyReply
+) {
+  try {
+    const servico = await service.obterServicoPorCodigo(request.query.municipioId, request.params.codigo);
+    if (!servico) {
+      return reply.status(404).send({ success: false, message: "Serviço não encontrado." });
+    }
+    return reply.send({ success: true, data: service.mapServicoParaPublicoDetalhe(servico) });
+  } catch (error) {
+    return tratarErro(request, reply, error, "Erro ao obter serviço público");
   }
 }

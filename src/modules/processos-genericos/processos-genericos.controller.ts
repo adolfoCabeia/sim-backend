@@ -25,7 +25,9 @@ import {
   obterAnexoSaidaCidadao,
   DirecaoNaoEncontradaError,
   receberRespostaSubida,
+  registarAcessoArquivoMorto,
 } from "./processos-genericos.service.js";
+import { hasPermission } from "../auth/rbac/rbac.service.js";
 import { storageService } from "../storage/storage.service.js";
 import {
   ProcessoGenericoNaoEncontradoError,
@@ -281,6 +283,39 @@ export async function listarProcessosController(
   request: FastifyRequest<{ Querystring: ListarProcessosGenericosQuery }>,
   reply: FastifyReply
 ) {
+  // ACHADO DE AUDITORIA: o Arquivo Morto tem uma regra de negócio
+  // explícita no documento do cliente (secção 8.1) — "o perfil da
+  // Secretaria Geral não tem permissão de acesso directo; o acesso
+  // depende de liberação explícita do Administrador Municipal,
+  // registada em log". O parâmetro `arquivo=MORTO`/`TODOS` estava
+  // disponível neste endpoint apenas atrás da permissão genérica
+  // "processos_genericos:consultar" — a mesma que qualquer utilizador
+  // com acesso normal a processos já tem — pelo que qualquer perfil
+  // (incl. Secretaria Geral) conseguia listar processos em Arquivo
+  // Morto sem qualquer liberação explícita nem registo de log. A rota
+  // de mudança de estado para Arquivo Morto (`arquivo_morto:aceder`)
+  // já estava correctamente protegida; faltava proteger a LEITURA.
+  if (request.query.arquivo === "MORTO" || request.query.arquivo === "TODOS") {
+    const permitido = await hasPermission(
+      request.user.sub,
+      request.user.municipioId,
+      "arquivo_morto:aceder"
+    );
+    if (!permitido) {
+      return reply.status(403).send({
+        success: false,
+        message:
+          "Consulta ao Arquivo Morto requer liberação explícita do Administrador Municipal.",
+        code: "PERMISSAO_INSUFICIENTE",
+      });
+    }
+    await registarAcessoArquivoMorto({
+      municipioId: request.user.municipioId,
+      utilizadorId: request.user.sub,
+      filtro: request.query.arquivo,
+    });
+  }
+
   const resultado = await listarProcessosGenericos({
     municipioId: request.user.municipioId,
     executorId: request.user.sub,
@@ -293,6 +328,29 @@ export async function listarAtribuidosAMimController(
   request: FastifyRequest<{ Querystring: Omit<ListarProcessosGenericosQuery, "atribuidosAMim"> }>,
   reply: FastifyReply
 ) {
+  // Ver nota de auditoria em listarProcessosController — a mesma
+  // restrição ao Arquivo Morto aplica-se aqui.
+  if (request.query.arquivo === "MORTO" || request.query.arquivo === "TODOS") {
+    const permitido = await hasPermission(
+      request.user.sub,
+      request.user.municipioId,
+      "arquivo_morto:aceder"
+    );
+    if (!permitido) {
+      return reply.status(403).send({
+        success: false,
+        message:
+          "Consulta ao Arquivo Morto requer liberação explícita do Administrador Municipal.",
+        code: "PERMISSAO_INSUFICIENTE",
+      });
+    }
+    await registarAcessoArquivoMorto({
+      municipioId: request.user.municipioId,
+      utilizadorId: request.user.sub,
+      filtro: request.query.arquivo,
+    });
+  }
+
   const resultado = await listarProcessosGenericos({
     municipioId: request.user.municipioId,
     executorId: request.user.sub,

@@ -7,6 +7,15 @@ const documentoExigidoObject = {
   },
 };
 
+const direcaoResponsavelObject = {
+  type: "object",
+  properties: {
+    id: { type: "string", format: "uuid" },
+    nome: { type: "string" },
+    sigla: { type: "string" },
+  },
+};
+
 const servicoObject = {
   type: "object",
   properties: {
@@ -16,10 +25,7 @@ const servicoObject = {
     descricao: { type: "string" },
     tipoProcesso: { type: "string" },
     direcaoResponsavelSigla: { type: "string" },
-    direcaoResponsavel: {
-      type: "object",
-      properties: { id: { type: "string", format: "uuid" }, nome: { type: "string" }, sigla: { type: "string" } },
-    },
+    direcaoResponsavel: direcaoResponsavelObject,
     origensPermitidas: { type: "array", items: { type: "string" } },
     documentosExigidos: { type: "array", items: documentoExigidoObject },
     pago: { type: "boolean" },
@@ -30,6 +36,45 @@ const servicoObject = {
     activo: { type: "boolean" },
     criadoEm: { type: "string", format: "date-time" },
     alteradoEm: { type: "string", format: "date-time" },
+  },
+};
+
+/** Modelo público resumido — usado apenas na listagem pública. Não inclui campos
+ * administrativos/internos (diasAlertaAntesPrazo, fonte, activo, timestamps). */
+const servicoPublicoResumoObject = {
+  type: "object",
+  properties: {
+    id: { type: "string", format: "uuid" },
+    codigo: { type: "string" },
+    nome: { type: "string" },
+    descricao: { type: "string" },
+    tipoProcesso: { type: "string" },
+    direcaoResponsavel: direcaoResponsavelObject,
+    pago: { type: "boolean" },
+    valorReferenciaKz: { type: "number", nullable: true },
+    prazoDiasCorridos: { type: "integer" },
+  },
+};
+
+/** Modelo público detalhado — usado no detalhe público, inclui documentosExigidos. */
+const servicoPublicoDetalheObject = {
+  type: "object",
+  properties: {
+    servico: {
+      type: "object",
+      properties: {
+        id: { type: "string", format: "uuid" },
+        codigo: { type: "string" },
+        nome: { type: "string" },
+        descricao: { type: "string" },
+        tipoProcesso: { type: "string" },
+      },
+    },
+    direcaoResponsavel: direcaoResponsavelObject,
+    documentosExigidos: { type: "array", items: documentoExigidoObject },
+    pago: { type: "boolean" },
+    valorReferenciaKz: { type: "number", nullable: true },
+    prazoDiasCorridos: { type: "integer" },
   },
 };
 
@@ -164,9 +209,10 @@ export const obterServicoDocs = {
 
 export const listarServicosPublicoDocs = {
   schema: {
-    tags: ["Catálogo de Serviços"],
-    summary: "Listar serviços activos do município (endpoint público, sem autenticação)",
-    description: "Substitui o antigo /servicos-municipais estático. Como os dados passaram a ser por município, é obrigatório indicar municipioId.",
+    tags: ["Catálogo de Serviços (Público)"],
+    summary: "Listar todos os serviços activos do município (endpoint público, sem autenticação)",
+    description:
+      "Endpoint público para o portal do cidadão. Não requer Bearer Token nem permissões administrativas. municipioId é obrigatório. Devolve todos os serviços activos do município indicado, sem paginação e sem limite de quantidade. Serviços desactivados nunca são devolvidos, e não é possível obter dados de outro município.",
     querystring: {
       type: "object",
       required: ["municipioId"],
@@ -178,6 +224,36 @@ export const listarServicosPublicoDocs = {
         pago: { type: "boolean" },
         pesquisa: { type: "string" },
       },
+    },
+    response: {
+      200: {
+        type: "object",
+        properties: { success: { type: "boolean" }, data: { type: "array", items: servicoPublicoResumoObject } },
+      },
+      400: errorResponse("municipioId em falta ou inválido."),
+    },
+  },
+};
+
+export const obterServicoPublicoDocs = {
+  schema: {
+    tags: ["Catálogo de Serviços (Público)"],
+    summary: "Obter o detalhe público de um serviço pelo código (endpoint público, sem autenticação)",
+    description:
+      "Endpoint público para o portal do cidadão. Não requer Bearer Token nem permissões administrativas. municipioId é obrigatório na query. Identifica o serviço pelo código (não pelo UUID). Devolve 404 quando o serviço não existir, não pertencer ao município indicado ou estiver desactivado.",
+    params: {
+      type: "object",
+      required: ["codigo"],
+      properties: { codigo: { type: "string", description: "Código do serviço, ex: ATESTADO_RESIDENCIA" } },
+    },
+    querystring: {
+      type: "object",
+      required: ["municipioId"],
+      properties: { municipioId: { type: "string", format: "uuid" } },
+    },
+    response: {
+      200: { type: "object", properties: { success: { type: "boolean" }, data: servicoPublicoDetalheObject } },
+      404: errorResponse("Serviço não encontrado, desactivado ou não pertence ao município indicado."),
     },
   },
 };

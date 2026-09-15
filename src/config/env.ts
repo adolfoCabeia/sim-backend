@@ -23,7 +23,9 @@ const envSchema = z.object({
     .default("false")
     .transform((v) => v === "true"),
   MINIO_BUCKET_DOCUMENTOS: z.string().default("simviana-documentos"), */
-
+DATABASE_POOL_MAX: z.coerce.number().default(15),
+DATABASE_BYPASS_POOL_MAX: z.coerce.number().default(5),
+DATABASE_SSL: z.coerce.boolean().optional(), // sem isto definido, SSL liga-se automaticamente fora de "development"
   AWS_REGION: z.string().min(1, "AWS_REGION é obrigatório"),
   AWS_ACCESS_KEY_ID: z.string().min(1, "AWS_ACCESS_KEY_ID é obrigatório"),
   AWS_SECRET_ACCESS_KEY: z.string().min(1, "AWS_SECRET_ACCESS_KEY é obrigatório"),

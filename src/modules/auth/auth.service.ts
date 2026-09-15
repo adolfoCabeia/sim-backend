@@ -459,7 +459,7 @@ export async function loginUser(
     utilizador.estado === "BLOQUEADA"
   ) {
     throw new ContaNaoActivaError(
-      `Conta com estado "${utilizador.estado}" — não pode iniciar sessão.`
+      `Conta com estado "${utilizador.estado}", não pode iniciar sessão.`
     );
   }
 

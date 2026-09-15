@@ -82,7 +82,25 @@ export const listarServicosQuerySchema = z.object({
 });
 export type ListarServicosQuery = z.infer<typeof listarServicosQuerySchema>;
 
-export const listarServicosPublicoQuerySchema = listarServicosQuerySchema.extend({
+/** Query da listagem pública: sem paginação e sem `activo` (é sempre forçado a true no serviço).
+ * Não herda de listarServicosQuerySchema de propósito — a API pública não deve aceitar page/pageSize. */
+export const listarServicosPublicoQuerySchema = z.object({
   municipioId: z.string().uuid(),
+  origem: z.enum(ORIGENS).optional(),
+  tipoProcesso: z.enum(TIPOS_PROCESSO).optional(),
+  direcaoResponsavelSigla: z.string().optional(),
+  pago: z.coerce.boolean().optional(),
+  pesquisa: z.string().max(200).optional(),
 });
 export type ListarServicosPublicoQuery = z.infer<typeof listarServicosPublicoQuerySchema>;
+
+/** Params/query do detalhe público (GET /servicos/publico/:codigo?municipioId=...). */
+export const obterServicoPublicoParamsSchema = z.object({
+  codigo: z.string().min(2).max(100),
+});
+export type ObterServicoPublicoParams = z.infer<typeof obterServicoPublicoParamsSchema>;
+
+export const obterServicoPublicoQuerySchema = z.object({
+  municipioId: z.string().uuid(),
+});
+export type ObterServicoPublicoQuery = z.infer<typeof obterServicoPublicoQuerySchema>;

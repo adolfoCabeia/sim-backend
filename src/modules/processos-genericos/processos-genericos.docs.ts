@@ -396,7 +396,7 @@ export const listarFuncionariosParaAtribuicaoDocs = {
     summary: "Listar funcionários de uma direcção, com carga de trabalho",
     description:
       "Devolve os funcionários activos da direcção indicada, cada um com a contagem de processos genéricos " +
-      "actualmente atribuídos a si (excluindo os já em Arquivo Morto) — usado para escolher a quem distribuir " +
+      "actualmente atribuídos a si (excluindo os já em Arquivo Morto), usado para escolher a quem distribuir " +
       "um processo com conhecimento da carga de trabalho de cada um. Requer a permissão " +
       "processos_genericos:atribuir_responsavel.",
     security: [{ bearerAuth: [] }],

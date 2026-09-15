@@ -81,6 +81,30 @@ export interface ServicoFormatado {
   alteradoEm: Date;
 }
 
+/** Modelo público resumido — usado na listagem (GET /servicos/publico). Não expor campos
+ * administrativos/internos aqui (diasAlertaAntesPrazo, fonte, activo, timestamps, etc). */
+export interface ServicoPublicoResumo {
+  id: string;
+  codigo: string;
+  nome: string;
+  descricao: string;
+  tipoProcesso: TipoProcessoGenerico;
+  direcaoResponsavel: { id: string; nome: string; sigla: string };
+  pago: boolean;
+  valorReferenciaKz: number | null;
+  prazoDiasCorridos: number;
+}
+
+/** Modelo público detalhado — usado no detalhe (GET /servicos/publico/:codigo). */
+export interface ServicoPublicoDetalhe {
+  servico: { id: string; codigo: string; nome: string; descricao: string; tipoProcesso: TipoProcessoGenerico };
+  direcaoResponsavel: { id: string; nome: string; sigla: string };
+  documentosExigidos: DocumentoExigidoItem[];
+  pago: boolean;
+  valorReferenciaKz: number | null;
+  prazoDiasCorridos: number;
+}
+
 function formatarServico(s: any): ServicoFormatado {
   return {
     id: s.id,
@@ -104,6 +128,40 @@ function formatarServico(s: any): ServicoFormatado {
     activo: s.activo,
     criadoEm: s.criadoEm,
     alteradoEm: s.alteradoEm,
+  };
+}
+
+/** Transformação explícita interno -> público (resumo). Nunca devolver ServicoFormatado
+ * directamente num endpoint público. */
+export function mapServicoParaPublicoResumo(servico: ServicoFormatado): ServicoPublicoResumo {
+  return {
+    id: servico.id,
+    codigo: servico.codigo,
+    nome: servico.nome,
+    descricao: servico.descricao,
+    tipoProcesso: servico.tipoProcesso,
+    direcaoResponsavel: servico.direcaoResponsavel,
+    pago: servico.pago,
+    valorReferenciaKz: servico.valorReferenciaKz ?? null,
+    prazoDiasCorridos: servico.prazoDiasCorridos,
+  };
+}
+
+/** Transformação explícita interno -> público (detalhe). */
+export function mapServicoParaPublicoDetalhe(servico: ServicoFormatado): ServicoPublicoDetalhe {
+  return {
+    servico: {
+      id: servico.id,
+      codigo: servico.codigo,
+      nome: servico.nome,
+      descricao: servico.descricao,
+      tipoProcesso: servico.tipoProcesso,
+    },
+    direcaoResponsavel: servico.direcaoResponsavel,
+    documentosExigidos: servico.documentosExigidos,
+    pago: servico.pago,
+    valorReferenciaKz: servico.valorReferenciaKz ?? null,
+    prazoDiasCorridos: servico.prazoDiasCorridos,
   };
 }
 
@@ -312,6 +370,9 @@ export async function obterServicoPorCodigoTx(tx: TransactionClient, codigo: str
   return servico ? formatarServico(servico) : null;
 }
 
+/** Usado pelo detalhe público: withTenantTransaction fixa a sessão RLS ao municipioId,
+ * e o filtro aqui acrescenta codigo + activo — logo a query fica sempre restrita a
+ * municipioId + codigo + activo em conjunto, nunca apenas por codigo. */
 export async function obterServicoPorCodigo(municipioId: string, codigo: string): Promise<ServicoFormatado | null> {
   return withTenantTransaction(municipioId, (tx) => obterServicoPorCodigoTx(tx, codigo));
 }
@@ -322,6 +383,7 @@ export async function filtrarServicosCatalogo(params: {
   tipoProcesso?: TipoProcessoGenerico;
   direcaoResponsavelSigla?: string;
   pago?: boolean;
+  pesquisa?: string;
 }): Promise<ServicoFormatado[]> {
   const where: Prisma.ServicoWhereInput = {
     municipioId: params.municipioId,
@@ -330,6 +392,14 @@ export async function filtrarServicosCatalogo(params: {
     ...(params.pago !== undefined ? { pago: params.pago } : {}),
     ...(params.origem ? { origensPermitidas: { has: params.origem } } : {}),
     ...(params.direcaoResponsavelSigla ? { direcaoResponsavel: { sigla: params.direcaoResponsavelSigla } } : {}),
+    ...(params.pesquisa
+      ? {
+          OR: [
+            { nome: { contains: params.pesquisa, mode: "insensitive" } },
+            { codigo: { contains: params.pesquisa, mode: "insensitive" } },
+          ],
+        }
+      : {}),
   };
 
   return withTenantTransaction(params.municipioId, async (tx) => {

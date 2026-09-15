@@ -8,6 +8,7 @@ import {
   listarServicosController,
   obterServicoController,
   listarServicosPublicoController,
+  obterServicoPublicoController
 } from "./servico.controller.js";
 import {
   criarServicoSchema,
@@ -25,6 +26,7 @@ import {
   listarServicosDocs,
   obterServicoDocs,
   listarServicosPublicoDocs,
+  obterServicoPublicoDocs
 } from "./servico.docs.js";
 import { validateBody } from "../../utils/validate.js";
 import { validateQuery } from "../../utils/validateQuery.js";
@@ -42,6 +44,8 @@ export async function servicosRoutes(fastify: FastifyInstance) {
     { ...listarServicosDocs, preHandler: [fastify.authenticate, requirePermission("servicos:consultar"), validateQuery(listarServicosQuerySchema)] },
     listarServicosController
   );
+
+  fastify.get("/servicos/publico/:codigo", { schema: obterServicoPublicoDocs.schema }, obterServicoPublicoController);
 
   fastify.get<{ Params: { id: string } }>(
     "/servicos/:id",

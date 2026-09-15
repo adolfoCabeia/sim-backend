@@ -409,3 +409,28 @@ export async function receberRespostaSubida(params: {
   const resultado = await ProcessEngine.receberRespostaSubida(params);
   return resultado;
 }
+
+/**
+ * Regista, no log de auditoria, cada consulta ao Arquivo Morto — exigido
+ * pela especificação (secção 8.1): o acesso ao Arquivo Morto depende de
+ * liberação explícita do Administrador Municipal e tem de ficar
+ * registado. A permissão em si é validada no controller (requer
+ * `arquivo_morto:aceder`); esta função só regista o acesso já autorizado.
+ */
+export async function registarAcessoArquivoMorto(params: {
+  municipioId: string;
+  utilizadorId: string;
+  filtro: "MORTO" | "TODOS";
+}) {
+  await withTenantTransaction(params.municipioId, async (tx) => {
+    await tx.logAuditoria.create({
+      data: {
+        municipioId: params.municipioId,
+        utilizadorId: params.utilizadorId,
+        accao: "CONSULTAR_ARQUIVO_MORTO",
+        entidade: "ProcessoGenerico",
+        detalhes: { filtro: params.filtro },
+      },
+    });
+  });
+}

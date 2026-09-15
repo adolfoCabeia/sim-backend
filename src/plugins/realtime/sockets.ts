@@ -26,7 +26,11 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
       credentials: false,
     },
   });
-  const pubClient = new Redis(env.REDIS_URL!);
+  const pubClient = new Redis(env.REDIS_URL!, {
+    maxRetriesPerRequest: null,
+    connectTimeout: 10_000,
+    retryStrategy: (times) => Math.min(times * 50, 5_000),
+  });
   pubClient.on("error", (err) => {
     app.log.error({ err }, "[Socket.IO] Erro na ligação Redis (pubClient)");
   });

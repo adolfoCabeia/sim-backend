@@ -17,14 +17,6 @@
  * superutilizador, e os testes que verificam isolamento fazem sempre
  * `SET ROLE app_user` antes de correr as queries que devem ser filtradas
  * pela RLS.
- *
- * GAPS DE MIGRAÇÃO CONHECIDOS (não introduzidos por este trabalho): as
- * tabelas `Funcionario` e `Ocorrencia` não têm nenhum `CREATE TABLE` nas
- * migrações do projecto (foram criadas via `prisma db push` nalgum
- * momento anterior, nunca via `migrate dev`) — os stubs abaixo existem
- * só para desbloquear as FKs que apontam para elas nas migrações mais
- * recentes. Ver aviso dado ao utilizador na conversa para o corrigir a
- * sério (`prisma migrate diff --from-empty`).
  */
 
 import { PGlite } from "@electric-sql/pglite";
@@ -32,35 +24,6 @@ import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 
 const MIGRATIONS_DIR = path.join(process.cwd(), "prisma", "migrations");
-
-const STUB_FUNCIONARIO = `
-  CREATE TABLE "Funcionario" (
-    "id" TEXT NOT NULL PRIMARY KEY,
-    "municipioId" TEXT NOT NULL,
-    "cargo" TEXT NOT NULL DEFAULT 'stub',
-    "estado" TEXT NOT NULL DEFAULT 'ATIVO',
-    "tipoVinculo" TEXT NOT NULL DEFAULT 'QUADRO',
-    "departamentoId" TEXT,
-    "ultimaNotificacaoFimVinculoEm" TIMESTAMP(3)
-  );
-`;
-
-const STUB_OCORRENCIA = `
-  CREATE TABLE "Ocorrencia" (
-    "id" TEXT NOT NULL PRIMARY KEY,
-    "numero" TEXT NOT NULL UNIQUE,
-    "municipioId" TEXT NOT NULL,
-    "criadoPorId" TEXT NOT NULL,
-    "bairroZona" TEXT NOT NULL,
-    "categoria" TEXT NOT NULL,
-    "titulo" TEXT NOT NULL,
-    "descricao" TEXT NOT NULL,
-    "estado" TEXT NOT NULL DEFAULT 'REGISTADA',
-    "prioridade" TEXT NOT NULL DEFAULT 'NORMAL',
-    "criadoEm" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "alteradoEm" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
-  );
-`;
 
 export interface TestDb {
   db: PGlite;
@@ -75,9 +38,6 @@ export interface TestDb {
 
 export async function criarTestDb(): Promise<TestDb> {
   const db = await PGlite.create();
-
-  await db.exec(STUB_FUNCIONARIO);
-  await db.exec(STUB_OCORRENCIA);
 
   const pastas = (await readdir(MIGRATIONS_DIR, { withFileTypes: true }))
     .filter((d) => d.isDirectory())

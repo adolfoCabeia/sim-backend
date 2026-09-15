@@ -3,7 +3,12 @@ import type { FastifyInstance } from "fastify";
 import { env } from "../../config/env.js";
 
 export const redisCleanupPlugin = fp(async (app: FastifyInstance) => {
-  const redis = app.redis;
+  if (!app.redis) {
+    app.log.warn("Redis not available for cleanup plugin");
+    return;
+  }
+
+  const redis = app.redis as any;
   const CLEANUP_INTERVAL = 60000; // 1 minuto
   const BATCH_SIZE = 100;
 

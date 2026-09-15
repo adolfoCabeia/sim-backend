@@ -44,9 +44,33 @@ export const listarConteudosPublicosQuerySchema = z.object({
 export type ListarConteudosPublicosQuery = z.infer<typeof listarConteudosPublicosQuerySchema>;
 
 export const listarConteudosPublicosPublicoQuerySchema = z.object({
-  page: z.coerce.number().int().positive().default(1),
-  pageSize: z.coerce.number().int().positive().max(100).default(20),
-  categoria: z.enum(CATEGORIAS).optional(),
-  municipioId: z.string().min(1).optional(),
+  page: z.coerce.number().int().min(1).default(1),
+
+  pageSize: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(100)
+    .default(20),
+
+  categoria: z
+    .enum([
+      "NOTICIA",
+      "AVISO",
+      "SERVICO",
+      "TRANSPARENCIA",
+      "LEGISLACAO",
+      "EVENTO",
+      "OUTRO",
+    ])
+    .optional(),
+
+  municipioId: z.string().uuid().optional(),
+
+  pesquisa: z
+    .string()
+    .trim()
+    .max(200)
+    .optional(),
 });
 export type ListarConteudosPublicosPublicoQuery = z.infer<typeof listarConteudosPublicosPublicoQuerySchema>;

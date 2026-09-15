@@ -31,7 +31,7 @@ import { validateBody } from "../../utils/validate.js";
 import { requireAnyPermission } from "../../middleware/hasPermission.js";
 
 export async function ocorrenciasRoutes(fastify: FastifyInstance) {
-    fastify.post(
+  fastify.post(
     "/ocorrencias",
     {
       ...criarOcorrenciaDocs,
