@@ -14,15 +14,18 @@ COPY package.json package-lock.json ./
 RUN --mount=type=cache,target=/root/.npm \
     npm ci
 
+
 FROM base AS build
 
 COPY --from=deps /app/node_modules ./node_modules
 
 COPY . .
 
-RUN npx prisma generate
-
 RUN npm run build
+
+RUN mkdir -p dist/generated/prisma && \
+    cp -R src/generated/prisma/* dist/generated/prisma/
+
 
 FROM base AS production
 
