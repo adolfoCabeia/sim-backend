@@ -59,6 +59,36 @@ const LOCALIZACOES_ADMINISTRATIVAS_GLOBAIS: LocalizacaoProcesso[] = [
   LocalizacaoProcesso.EXPEDIENTE_SAIDA_A_FORMALIZAR,
   LocalizacaoProcesso.RESPOSTA_A_SUBIR,
 ];
+
+/*
+ * ── NOTA IMPORTANTE SOBRE NOTIFICAÇÕES ──────────────────────────────────
+ * As funções `notificarX(tx, ...)` fazem I/O de rede (email/SMS/push).
+ * NUNCA devem ser chamadas com o `tx` da transação de negócio principal:
+ * se a rede demorar, a transação (que tem um timeout curto, tipicamente
+ * 5-10s) expira e o commit falha com P2028, mesmo que as escritas na BD
+ * já estivessem prontas há muito tempo.
+ *
+ * Padrão adotado em todo este ficheiro:
+ *   1. `withTenantTransaction` só faz leituras/escritas de negócio e
+ *      devolve dados simples (não devolve `tx`, nem faz await de rede).
+ *   2. Depois do commit, disparamos a notificação numa transação curta
+ *      e independente, através de `dispararNotificacao`.
+ *   3. Falhas de notificação são apanhadas e logadas — nunca revertem
+ *      nem falham a ação de negócio já concluída.
+ */
+async function dispararNotificacao(
+  municipioId: string,
+  contexto: string,
+  fn: (tx: Prisma.TransactionClient) => Promise<void>
+): Promise<void> {
+  try {
+    await withTenantTransaction(municipioId, fn);
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error(`[notificacao] Falha ao notificar (${contexto}):`, err);
+  }
+}
+
 async function verificarSegmentacaoPorArea(
   tx: Prisma.TransactionClient,
   executorId: string,
@@ -229,138 +259,158 @@ export async function criarProcesso(params: {
   responsavelActualId?: string;
   servicoCodigo?: string;
 }) {
-  return withTenantTransaction(params.municipioId, async (tx) => {
-    const servico = params.servicoCodigo ? await obterServicoPorCodigoTx(tx, params.servicoCodigo) : undefined;
-    if (params.servicoCodigo && !servico) {
-      throw new ServicoNaoEncontradoError(`O serviço "${params.servicoCodigo}" não existe no catálogo.`);
-    }
-    if (servico) {
-      if (servico.tipoProcesso !== params.tipo) {
-        throw new ServicoIncompativelError(
-          `O serviço "${servico.nome}" é do tipo ${servico.tipoProcesso}, mas foi pedido como ${params.tipo}.`
+  const { processo, requerenteParaNotificar, servicoNome, temPagamento } = await withTenantTransaction(
+    params.municipioId,
+    async (tx) => {
+      const servico = params.servicoCodigo ? await obterServicoPorCodigoTx(tx, params.servicoCodigo) : undefined;
+      if (params.servicoCodigo && !servico) {
+        throw new ServicoNaoEncontradoError(`O serviço "${params.servicoCodigo}" não existe no catálogo.`);
+      }
+      if (servico) {
+        if (servico.tipoProcesso !== params.tipo) {
+          throw new ServicoIncompativelError(
+            `O serviço "${servico.nome}" é do tipo ${servico.tipoProcesso}, mas foi pedido como ${params.tipo}.`
+          );
+        }
+        if (!servico.origensPermitidas.includes(params.origem)) {
+          throw new ServicoIncompativelError(
+            `O serviço "${servico.nome}" não pode ser pedido pela origem ${params.origem} ` +
+            `(permitido: ${servico.origensPermitidas.join(", ")}).`
+          );
+        }
+      }
+
+      let direcaoOrigemId = params.direcaoOrigemId;
+      if (servico && !direcaoOrigemId) {
+        direcaoOrigemId = servico.direcaoResponsavel.id;
+      }
+
+      const gam = await tx.direcao.findUnique({
+        where: { municipioId_sigla: { municipioId: params.municipioId, sigla: "GAM" } },
+        select: { id: true },
+      });
+      if (!gam) {
+        throw new DirecaoNaoEncontradaError(
+          "O Gabinete do Administrador Municipal (GAM) não está configurado para este município, verifica se o seed foi corrido."
         );
       }
-      if (!servico.origensPermitidas.includes(params.origem)) {
-        throw new ServicoIncompativelError(
-          `O serviço "${servico.nome}" não pode ser pedido pela origem ${params.origem} ` +
-          `(permitido: ${servico.origensPermitidas.join(", ")}).`
-        );
-      }
-    }
 
-    let direcaoOrigemId = params.direcaoOrigemId;
-    if (servico && !direcaoOrigemId) {
-      direcaoOrigemId = servico.direcaoResponsavel.id;
-    }
-
-    const gam = await tx.direcao.findUnique({
-      where: { municipioId_sigla: { municipioId: params.municipioId, sigla: "GAM" } },
-      select: { id: true },
-    });
-    if (!gam) {
-      throw new DirecaoNaoEncontradaError(
-        "O Gabinete do Administrador Municipal (GAM) não está configurado para este município, verifica se o seed foi corrido."
-      );
-    }
-
-    const numero = await gerarNumeroProcessoGenerico(tx, {
-      municipioId: params.municipioId,
-      tipo: params.tipo,
-      direcaoOrigemId: direcaoOrigemId ?? null,
-    });
-
-    const criadoEm = new Date();
-    const prazoLegalResposta = calcularPrazoLegal(params.tipo, criadoEm);
-    const diasAlertaAntesPrazo = diasAlertaPara(params.tipo);
-
-    const processo = await tx.processoGenerico.create({
-      data: {
+      const numero = await gerarNumeroProcessoGenerico(tx, {
         municipioId: params.municipioId,
-        numero,
         tipo: params.tipo,
-        origem: params.origem,
-        assunto: params.assunto,
-        estado: EstadoProcessoGenerico.RECEBIDO,
-        prazoLegalResposta,
-        diasAlertaAntesPrazo,
-        ...(params.requerenteUtilizadorId !== undefined && { requerenteUtilizadorId: params.requerenteUtilizadorId }),
-        ...(direcaoOrigemId !== undefined && { direcaoOrigemId }),
-        direcaoAtualId: gam.id,
-        ...(params.responsavelActualId !== undefined && { responsavelActualId: params.responsavelActualId }),
-        ...(params.servicoCodigo !== undefined && { servicoCodigo: params.servicoCodigo }),
-      },
-      select: SELECT_PROCESSO_GENERICO,
-    });
+        direcaoOrigemId: direcaoOrigemId ?? null,
+      });
 
-    await tx.processoGenericoTransicao.create({
-      data: {
-        processoId: processo.id,
-        estadoAnterior: null,
-        estadoNovo: EstadoProcessoGenerico.RECEBIDO,
-        ...(params.requerenteUtilizadorId !== undefined && { utilizadorId: params.requerenteUtilizadorId }),
-        visivelAoCidadao: true,
-        ...(servico && {
-          observacao: `Solicitação do serviço "${servico.nome}". Documentos exigidos: ${servico.documentosExigidos
-            .filter((d) => d.obrigatorio)
-            .map((d) => d.nome)
-            .join("; ")}.`,
-        }),
-      },
-    });
-    if (servico?.pago) {
-      await criarPagamentoParaProcessoTx(tx, {
-        municipioId: params.municipioId,
-        processoId: processo.id,
-        ...(servico.valorReferenciaKz !== undefined && { valorReferenciaKz: servico.valorReferenciaKz }),
-        ...(params.requerenteUtilizadorId !== undefined && { criadoPorId: params.requerenteUtilizadorId }),
+      const criadoEm = new Date();
+      const prazoLegalResposta = calcularPrazoLegal(params.tipo, criadoEm);
+      const diasAlertaAntesPrazo = diasAlertaPara(params.tipo);
+
+      const processo = await tx.processoGenerico.create({
+        data: {
+          municipioId: params.municipioId,
+          numero,
+          tipo: params.tipo,
+          origem: params.origem,
+          assunto: params.assunto,
+          estado: EstadoProcessoGenerico.RECEBIDO,
+          prazoLegalResposta,
+          diasAlertaAntesPrazo,
+          ...(params.requerenteUtilizadorId !== undefined && { requerenteUtilizadorId: params.requerenteUtilizadorId }),
+          ...(direcaoOrigemId !== undefined && { direcaoOrigemId }),
+          direcaoAtualId: gam.id,
+          ...(params.responsavelActualId !== undefined && { responsavelActualId: params.responsavelActualId }),
+          ...(params.servicoCodigo !== undefined && { servicoCodigo: params.servicoCodigo }),
+        },
+        select: SELECT_PROCESSO_GENERICO,
       });
 
       await tx.processoGenericoTransicao.create({
         data: {
           processoId: processo.id,
-          estadoAnterior: EstadoProcessoGenerico.RECEBIDO,
+          estadoAnterior: null,
           estadoNovo: EstadoProcessoGenerico.RECEBIDO,
-          observacao:
-            servico.valorReferenciaKz !== undefined
-              ? `Este serviço tem uma taxa associada (${servico.valorReferenciaKz} Kz). Consulte pagamentos para obter a referência de pagamento.`
-              : "Este serviço tem uma taxa associada, a confirmar pela Direcção responsável. Consulte pagamentos para obter a referência de pagamento.",
+          ...(params.requerenteUtilizadorId !== undefined && { utilizadorId: params.requerenteUtilizadorId }),
           visivelAoCidadao: true,
+          ...(servico && {
+            observacao: `Solicitação do serviço "${servico.nome}". Documentos exigidos: ${servico.documentosExigidos
+              .filter((d) => d.obrigatorio)
+              .map((d) => d.nome)
+              .join("; ")}.`,
+          }),
         },
       });
 
-      return tx.processoGenerico.findUniqueOrThrow({ where: { id: processo.id }, select: SELECT_PROCESSO_GENERICO });
-    }
-
-    if (params.requerenteUtilizadorId) {
-      const requerente = await tx.utilizador.findUnique({
-        where: { id: params.requerenteUtilizadorId },
-        select: { email: true, nomeCompleto: true, telefone: true },
-      });
-
-      if (requerente) {
-        await notificarCidadaoSubmissao(tx, {
-          requerenteId: params.requerenteUtilizadorId,
-          email: requerente.email,
-          nomeCompleto: requerente.nomeCompleto,
-          telefone: requerente.telefone,
-          numeroProcesso: processo.numero,
+      if (servico?.pago) {
+        await criarPagamentoParaProcessoTx(tx, {
+          municipioId: params.municipioId,
           processoId: processo.id,
-          servicoNome: servico?.nome,
+          ...(servico.valorReferenciaKz !== undefined && { valorReferenciaKz: servico.valorReferenciaKz }),
+          ...(params.requerenteUtilizadorId !== undefined && { criadoPorId: params.requerenteUtilizadorId }),
         });
-      }
-    }
 
+        await tx.processoGenericoTransicao.create({
+          data: {
+            processoId: processo.id,
+            estadoAnterior: EstadoProcessoGenerico.RECEBIDO,
+            estadoNovo: EstadoProcessoGenerico.RECEBIDO,
+            observacao:
+              servico.valorReferenciaKz !== undefined
+                ? `Este serviço tem uma taxa associada (${servico.valorReferenciaKz} Kz). Consulte pagamentos para obter a referência de pagamento.`
+                : "Este serviço tem uma taxa associada, a confirmar pela Direcção responsável. Consulte pagamentos para obter a referência de pagamento.",
+            visivelAoCidadao: true,
+          },
+        });
+
+        const processoFinal = await tx.processoGenerico.findUniqueOrThrow({
+          where: { id: processo.id },
+          select: SELECT_PROCESSO_GENERICO,
+        });
+
+        // Quando há pagamento pendente, não se notifica já o cidadão da
+        // submissão "normal" (fica a aguardar confirmação de pagamento).
+        return { processo: processoFinal, requerenteParaNotificar: null, servicoNome: servico?.nome, temPagamento: true };
+      }
+
+      let requerenteParaNotificar: { id: string; email: string | null; nomeCompleto: string | null; telefone: string | null } | null = null;
+      if (params.requerenteUtilizadorId) {
+        const requerente = await tx.utilizador.findUnique({
+          where: { id: params.requerenteUtilizadorId },
+          select: { id: true, email: true, nomeCompleto: true, telefone: true },
+        });
+        if (requerente) requerenteParaNotificar = requerente;
+      }
+
+      return { processo, requerenteParaNotificar, servicoNome: servico?.nome, temPagamento: false };
+    }
+  );
+  if (requerenteParaNotificar) {
+    await dispararNotificacao(params.municipioId, `criarProcesso:cidadao:${processo.id}`, async (tx) => {
+      await notificarCidadaoSubmissao(tx, {
+        requerenteId: requerenteParaNotificar.id,
+        email: requerenteParaNotificar.email,
+        nomeCompleto: requerenteParaNotificar.nomeCompleto,
+        telefone: requerenteParaNotificar.telefone,
+        numeroProcesso: processo.numero,
+        processoId: processo.id,
+        servicoNome,
+      });
+    });
+  }
+
+  await dispararNotificacao(params.municipioId, `criarProcesso:gam:${processo.id}`, async (tx) => {
     await notificarGam(tx, {
       municipioId: params.municipioId,
       titulo: `Novo processo ${processo.numero}`,
-      mensagem: `Um novo processo do tipo "${params.tipo}" foi submetido pelo cidadão e aguarda apresentação ao Administrador.`,
+      mensagem: temPagamento
+        ? `Um novo processo do tipo "${params.tipo}" foi submetido e aguarda confirmação de pagamento.`
+        : `Um novo processo do tipo "${params.tipo}" foi submetido pelo cidadão e aguarda apresentação ao Administrador.`,
       tipo: "PROCESSO_SUBMETIDO",
       processoId: processo.id,
       numeroProcesso: processo.numero,
     });
-
-    return processo;
   });
+
+  return processo;
 }
 
 async function avancarLocalizacao(
@@ -612,7 +662,7 @@ export async function transicionar(params: {
     }
   }
 
-  return withTenantTransaction(params.municipioId, async (tx) => {
+  const { actualizado, notificacaoCidadao } = await withTenantTransaction(params.municipioId, async (tx) => {
     const processo = await obterProcessoGenericoOuFalhar(tx, params.processoId);
 
     if (processo.arquivoMortoEm) {
@@ -685,27 +735,44 @@ export async function transicionar(params: {
         visivelAoCidadao,
       },
     });
+
+    let notificacaoCidadao: {
+      requerenteId: string;
+      email: string | null;
+      nomeCompleto: string | null;
+      telefone: string | null;
+    } | null = null;
+
     if (processo.requerenteUtilizadorId && visivelAoCidadao) {
       const requerente = await tx.utilizador.findUnique({
         where: { id: processo.requerenteUtilizadorId },
         select: { email: true, nomeCompleto: true, telefone: true },
       });
-
       if (requerente) {
-        await notificarCidadaoTransicao(tx, {
-          requerenteId: processo.requerenteUtilizadorId,
-          email: requerente.email,
-          nomeCompleto: requerente.nomeCompleto,
-          telefone: requerente.telefone,
-          numeroProcesso: processo.numero,
-          processoId: processo.id,
-          estadoNovo: traduzirEstado(params.novoEstado),
-          observacao: params.observacao,
-        });
+        notificacaoCidadao = { requerenteId: processo.requerenteUtilizadorId, ...requerente };
       }
     }
-    return actualizado;
+
+    return { actualizado, notificacaoCidadao };
   });
+
+  // ── Notificação do cidadão: fora da transação de escrita ──
+  if (notificacaoCidadao) {
+    await dispararNotificacao(params.municipioId, `transicionar:cidadao:${params.processoId}`, async (tx) => {
+      await notificarCidadaoTransicao(tx, {
+        requerenteId: notificacaoCidadao.requerenteId,
+        email: notificacaoCidadao.email,
+        nomeCompleto: notificacaoCidadao.nomeCompleto,
+        telefone: notificacaoCidadao.telefone,
+        numeroProcesso: actualizado.numero,
+        processoId: actualizado.id,
+        estadoNovo: traduzirEstado(params.novoEstado),
+        observacao: params.observacao,
+      });
+    });
+  }
+
+  return actualizado;
 }
 
 function traduzirEstado(estado: EstadoProcessoGenerico): string {
@@ -728,62 +795,75 @@ export async function atribuirResponsavel(params: {
   executorId: string;
   novoResponsavelActualId: string;
 }) {
-  return withTenantTransaction(params.municipioId, async (tx) => {
-    const processo = await obterProcessoGenericoOuFalhar(tx, params.processoId);
+  const { actualizado, funcionario, atribuidoPorNome, numeroProcesso } = await withTenantTransaction(
+    params.municipioId,
+    async (tx) => {
+      const processo = await obterProcessoGenericoOuFalhar(tx, params.processoId);
 
-    if (processo.arquivoMortoEm) {
-      throw new ProcessoJaArquivadoError("Processo em Arquivo Morto, não pode ser reatribuído sem desarquivar primeiro.");
+      if (processo.arquivoMortoEm) {
+        throw new ProcessoJaArquivadoError("Processo em Arquivo Morto, não pode ser reatribuído sem desarquivar primeiro.");
+      }
+      if (!processo.direcaoAtualId) {
+        throw new AtribuicaoInvalidaError("Este processo ainda não tem uma direcção atribuída, atribua a direcção primeiro.");
+      }
+
+      const funcionario = await tx.utilizador.findUnique({
+        where: { id: params.novoResponsavelActualId },
+        select: { id: true, direcaoId: true, estado: true, nomeCompleto: true, email: true },
+      });
+      if (!funcionario || funcionario.estado !== "ACTIVA") {
+        throw new AtribuicaoInvalidaError("O funcionário indicado não existe ou não está activo.");
+      }
+      if (funcionario.direcaoId !== processo.direcaoAtualId) {
+        throw new AtribuicaoInvalidaError(
+          "O funcionário indicado não pertence à direcção actual deste processo — só se pode indicar alguém do próprio gabinete."
+        );
+      }
+
+      const executor = await tx.utilizador.findUnique({
+        where: { id: params.executorId },
+        select: { nomeCompleto: true },
+      });
+
+      const actualizado = await tx.processoGenerico.update({
+        where: { id: processo.id },
+        data: { responsavelActualId: params.novoResponsavelActualId },
+        select: SELECT_PROCESSO_GENERICO,
+      });
+
+      await tx.processoGenericoTransicao.create({
+        data: {
+          processoId: processo.id,
+          estadoAnterior: processo.estado,
+          estadoNovo: processo.estado,
+          utilizadorId: params.executorId,
+          observacao: `Processo atribuído a ${funcionario.nomeCompleto} para tratamento.`,
+          visivelAoCidadao: false,
+        },
+      });
+
+      return {
+        actualizado,
+        funcionario,
+        atribuidoPorNome: executor?.nomeCompleto ?? "Administração Municipal",
+        numeroProcesso: processo.numero,
+      };
     }
-    if (!processo.direcaoAtualId) {
-      throw new AtribuicaoInvalidaError("Este processo ainda não tem uma direcção atribuída, atribua a direcção primeiro.");
-    }
+  );
 
-    const funcionario = await tx.utilizador.findUnique({
-      where: { id: params.novoResponsavelActualId },
-      select: { id: true, direcaoId: true, estado: true, nomeCompleto: true, email: true },
-    });
-    if (!funcionario || funcionario.estado !== "ACTIVA") {
-      throw new AtribuicaoInvalidaError("O funcionário indicado não existe ou não está activo.");
-    }
-    if (funcionario.direcaoId !== processo.direcaoAtualId) {
-      throw new AtribuicaoInvalidaError(
-        "O funcionário indicado não pertence à direcção actual deste processo — só se pode indicar alguém do próprio gabinete."
-      );
-    }
-
-    const executor = await tx.utilizador.findUnique({
-      where: { id: params.executorId },
-      select: { nomeCompleto: true },
-    });
-
-    const actualizado = await tx.processoGenerico.update({
-      where: { id: processo.id },
-      data: { responsavelActualId: params.novoResponsavelActualId },
-      select: SELECT_PROCESSO_GENERICO,
-    });
-
-    await tx.processoGenericoTransicao.create({
-      data: {
-        processoId: processo.id,
-        estadoAnterior: processo.estado,
-        estadoNovo: processo.estado,
-        utilizadorId: params.executorId,
-        observacao: `Processo atribuído a ${funcionario.nomeCompleto} para tratamento.`,
-        visivelAoCidadao: false,
-      },
-    });
-
+  // ── Notificação do novo responsável: fora da transação de escrita ──
+  await dispararNotificacao(params.municipioId, `atribuirResponsavel:${params.processoId}`, async (tx) => {
     await notificarAtribuicao(tx, {
       funcionarioId: funcionario.id,
       email: funcionario.email,
       nomeCompleto: funcionario.nomeCompleto,
-      numeroProcesso: processo.numero,
-      processoId: processo.id,
-      atribuidoPorNome: executor?.nomeCompleto ?? "Administração Municipal",
+      numeroProcesso: numeroProcesso,
+      processoId: params.processoId,
+      atribuidoPorNome,
     });
-
-    return actualizado;
   });
+
+  return actualizado;
 }
 
 export async function listarFuncionariosParaAtribuicao(params: { municipioId: string; direcaoId: string }) {

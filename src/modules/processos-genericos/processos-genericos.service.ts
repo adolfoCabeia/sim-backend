@@ -1,5 +1,5 @@
 import { withTenantTransaction } from "../../config/prisma.js";
-import type { TipoProcessoGenerico, OrigemProcessoGenerico, EstadoProcessoGenerico } from "../../generated/prisma/client.js";
+import type { Prisma, TipoProcessoGenerico, OrigemProcessoGenerico, EstadoProcessoGenerico } from "../../generated/prisma/client.js";
 import * as ProcessEngine from "../../core/process-engine/process-engine.service.js";
 import type { CriarProcessoInput, TransicionarProcessoInput, ListarProcessosGenericosQuery } from "./processos-genericos.schema.js";
 import { AreaForaDaDelegacaoError, ProcessoGenericoNaoEncontradoError } from "../../core/process-engine/process-engine.service.js";
@@ -7,13 +7,40 @@ import { hasPermission } from "../../modules/auth/rbac/rbac.service.js";
 import { revogarSalaProcesso } from "../../core/process-engine/process-engine.chat.realtime.js";
 
 import {
-  notificarCidadaoSubmissao,
-  notificarCidadaoTransicao,
-  notificarAtribuicao,
-  notificarGam,
   notificarAcaoProcesso,
+  notificarGam,
 } from "../../core/process-engine/process-engine.notifications.js";
 export class DirecaoNaoEncontradaError extends Error { }
+
+/*
+ * ── NOTA SOBRE NOTIFICAÇÕES (ver também process-engine.service.ts) ──────
+ * As chamadas a notificarX(tx, ...) fazem I/O de rede (email/SMS/push) e
+ * NUNCA devem correr dentro da mesma transação de escrita do negócio nem
+ * ser aguardadas antes do commit — se a rede demorar, a transação expira
+ * (timeout curto) e o commit falha com P2028, mesmo tendo os dados já
+ * prontos. Por isso:
+ *   1. As transações abaixo só leem/escrevem na BD.
+ *   2. As notificações são disparadas DEPOIS, em transações curtas e
+ *      independentes, através de `dispararNotificacao`.
+ *   3. Falhas de notificação são logadas, nunca revertem a ação principal.
+ *
+ * Nota adicional: a criação de processo e a atribuição de responsável já
+ * notificam o cidadão/funcionário dentro de `ProcessEngine.criarProcesso`
+ * e `ProcessEngine.atribuirResponsavel`, respetivamente. As chamadas que
+ * existiam aqui a duplicar essas notificações foram removidas.
+ */
+async function dispararNotificacao(
+  municipioId: string,
+  contexto: string,
+  fn: (tx: Prisma.TransactionClient) => Promise<void>
+): Promise<void> {
+  try {
+    await withTenantTransaction(municipioId, fn);
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error(`[notificacao] Falha ao notificar (${contexto}):`, err);
+  }
+}
 
 async function resolverDirecaoOrigemId(municipioId: string, sigla?: string): Promise<string | undefined> {
   if (!sigla) return undefined;
@@ -29,34 +56,6 @@ async function resolverDirecaoOrigemId(municipioId: string, sigla?: string): Pro
   });
 }
 
-/* ── Helper: notifica o novo responsável ── */
-async function notificarNovoResponsavel(
-  municipioId: string,
-  processoId: string,
-  novoResponsavelId: string,
-  atribuidoPorNome: string
-): Promise<void> {
-  return withTenantTransaction(municipioId, async (tx) => {
-    const processo = await tx.processoGenerico.findUnique({
-      where: { id: processoId },
-      select: { numero: true },
-    });
-    const funcionario = await tx.utilizador.findUnique({
-      where: { id: novoResponsavelId },
-      select: { id: true, email: true, nomeCompleto: true },
-    });
-    if (!processo || !funcionario) return;
-
-    await notificarAtribuicao(tx, {
-      funcionarioId: funcionario.id,
-      email: funcionario.email,
-      nomeCompleto: funcionario.nomeCompleto,
-      numeroProcesso: processo.numero,
-      processoId,
-      atribuidoPorNome,
-    });
-  });
-}
 async function notificarFuncionariosEnvolvidosTransicao(params: {
   municipioId: string;
   processoId: string;
@@ -65,12 +64,13 @@ async function notificarFuncionariosEnvolvidosTransicao(params: {
   estadoNovo: EstadoProcessoGenerico;
   observacao?: string;
 }): Promise<void> {
-  return withTenantTransaction(params.municipioId, async (tx) => {
+  // 1) Leitura pura: descobre quem tem de ser notificado (dentro da tx).
+  const dados = await withTenantTransaction(params.municipioId, async (tx) => {
     const processo = await tx.processoGenerico.findUnique({
       where: { id: params.processoId },
       select: { numero: true, responsavelActualId: true },
     });
-    if (!processo) return;
+    if (!processo) return null;
 
     const condicoesEnvolvidos: object[] = [
       { perfis: { some: { perfil: { nome: { in: ["SUPER_ADMIN", "ADMINISTRADOR_MUNICIPAL"] } } } } },
@@ -90,21 +90,28 @@ async function notificarFuncionariosEnvolvidosTransicao(params: {
       select: { id: true, email: true, nomeCompleto: true },
     });
 
-    if (envolvidos.length === 0) return;
+    if (envolvidos.length === 0) return null;
 
     // deduplicar (o responsável pode também ter perfil global)
     const unicos = new Map(envolvidos.map((u) => [u.id, u]));
 
+    return { numeroProcesso: processo.numero, destinatarios: [...unicos.values()] };
+  });
+
+  if (!dados) return;
+
+  // 2) Notificação: fora da transação de leitura, em transação própria e curta.
+  await dispararNotificacao(params.municipioId, `transicaoEnvolvidos:${params.processoId}`, async (tx) => {
     await notificarAcaoProcesso(tx, {
-      titulo: `Processo ${processo.numero} — ${params.estadoNovo}`,
+      titulo: `Processo ${dados.numeroProcesso} — ${params.estadoNovo}`,
       mensagem:
-        `O processo ${processo.numero} transitou de "${params.estadoAnterior}" para ` +
+        `O processo ${dados.numeroProcesso} transitou de "${params.estadoAnterior}" para ` +
         `"${params.estadoNovo}".` +
         (params.observacao ? ` ${params.observacao}` : ""),
       tipo: "PROCESSO_ATUALIZADO",
       processoId: params.processoId,
-      numeroProcesso: processo.numero,
-      destinatarios: [...unicos.values()].map((u) => ({
+      numeroProcesso: dados.numeroProcesso,
+      destinatarios: dados.destinatarios.map((u) => ({
         utilizadorId: u.id,
         email: u.email,
         nomeCompleto: u.nomeCompleto,
@@ -120,6 +127,8 @@ export async function criarProcessoGenerico(params: {
 }) {
   const direcaoOrigemId = await resolverDirecaoOrigemId(params.municipioId, params.input.direcaoOrigemSigla);
 
+  // ProcessEngine.criarProcesso já trata da notificação ao cidadão e ao GAM
+  // internamente (fora da sua transação de escrita) — não repetir aqui.
   const processo = await ProcessEngine.criarProcesso({
     municipioId: params.municipioId,
     tipo: params.input.tipo as TipoProcessoGenerico,
@@ -128,25 +137,6 @@ export async function criarProcessoGenerico(params: {
     requerenteUtilizadorId: params.requerenteUtilizadorId,
     ...(direcaoOrigemId !== undefined && { direcaoOrigemId }),
     ...(params.input.servicoCodigo !== undefined && { servicoCodigo: params.input.servicoCodigo }),
-  });
-
-  /* Notificar cidadão na submissão — 3 vias */
-  await withTenantTransaction(params.municipioId, async (tx) => {
-    const requerente = await tx.utilizador.findUnique({
-      where: { id: params.requerenteUtilizadorId },
-      select: { id: true, email: true, nomeCompleto: true, telefone: true },
-    });
-    if (requerente && processo.numero) {
-      await notificarCidadaoSubmissao(tx, {
-        requerenteId: requerente.id,
-        email: requerente.email ?? "",
-        nomeCompleto: requerente.nomeCompleto ?? "",
-        telefone: requerente.telefone,
-        numeroProcesso: processo.numero,
-        processoId: processo.id,
-        servicoNome: params.input.servicoCodigo,
-      });
-    }
   });
 
   return processo;
@@ -203,6 +193,10 @@ export async function transicionarProcessoGenerico(params: {
     return p?.estado;
   });
 
+  // ProcessEngine.transicionar já notifica o cidadão internamente (fora da
+  // sua transação de escrita). Aqui só resta notificar internamente os
+  // funcionários envolvidos, o que também já corre fora de qualquer
+  // transação de escrita (ver notificarFuncionariosEnvolvidosTransicao).
   const resultado = await ProcessEngine.transicionar({
     municipioId: params.municipioId,
     processoId: params.processoId,
@@ -260,7 +254,6 @@ export async function arquivarMorto(params: { municipioId: string; processoId: s
   return resultado;
 }
 
-
 export async function atribuirResponsavelProcesso(params: {
   municipioId: string;
   processoId: string;
@@ -276,6 +269,11 @@ export async function atribuirResponsavelProcesso(params: {
     return p?.responsavelActualId ?? null;
   });
 
+  // ProcessEngine.atribuirResponsavel já notifica o novo responsável
+  // internamente (fora da sua transação de escrita) — não repetir aqui.
+  // (Removida a chamada duplicada a `notificarNovoResponsavel`, que causava
+  // notificações repetidas e, mais grave, corria uma segunda operação de
+  // rede logo a seguir a uma transação de escrita ainda em curso.)
   const resultado = await ProcessEngine.atribuirResponsavel(params);
 
   // se mudou de facto de pessoa, expulsa o antigo responsável da sala em tempo real
@@ -283,19 +281,9 @@ export async function atribuirResponsavelProcesso(params: {
     revogarSalaProcesso(params.processoId, antigoResponsavelId);
   }
 
-  const executor = await withTenantTransaction(params.municipioId, async (tx) =>
-    tx.utilizador.findUnique({ where: { id: params.executorId }, select: { nomeCompleto: true } })
-  );
-
-  await notificarNovoResponsavel(
-    params.municipioId,
-    params.processoId,
-    params.novoResponsavelActualId,
-    executor?.nomeCompleto ?? "Sistema"
-  );
-
   return resultado;
 }
+
 export async function listarFuncionariosParaAtribuicao(params: { municipioId: string; direcaoId: string }) {
   return ProcessEngine.listarFuncionariosParaAtribuicao(params);
 }
@@ -310,22 +298,28 @@ export async function apresentarAoAdministrador(params: {
 
   // Movimento interno de circuito — o cidadão não é notificado aqui.
   // Só é notificado quando o ESTADO muda de facto (ver transicionarProcessoGenerico).
-  await withTenantTransaction(params.municipioId, async (tx) => {
-    const processo = await tx.processoGenerico.findUnique({
+  //
+  // A leitura do processo (para obter o número) é feita numa transação
+  // curta; a notificação ao GAM corre depois, fora dela.
+  const processo = await withTenantTransaction(params.municipioId, async (tx) => {
+    return tx.processoGenerico.findUnique({
       where: { id: params.processoId },
       select: { id: true, numero: true },
     });
-    if (!processo) return;
-
-    await notificarGam(tx, {
-      municipioId: params.municipioId,
-      titulo: `Processo ${processo.numero} — Apresentado ao Administrador`,
-      mensagem: `O processo ${processo.numero} foi apresentado ao Administrador${params.observacao ? ": " + params.observacao : "."}`,
-      tipo: "ACAO_REQUERIDA",
-      processoId: processo.id,
-      numeroProcesso: processo.numero,
-    });
   });
+
+  if (processo) {
+    await dispararNotificacao(params.municipioId, `apresentarAoAdministrador:${params.processoId}`, async (tx) => {
+      await notificarGam(tx, {
+        municipioId: params.municipioId,
+        titulo: `Processo ${processo.numero} — Apresentado ao Administrador`,
+        mensagem: `O processo ${processo.numero} foi apresentado ao Administrador${params.observacao ? ": " + params.observacao : "."}`,
+        tipo: "ACAO_REQUERIDA",
+        processoId: processo.id,
+        numeroProcesso: processo.numero,
+      });
+    });
+  }
 
   return resultado;
 }
@@ -365,6 +359,7 @@ export async function subirResposta(params: {
   observacao?: string;
 }) {
   const resultado = await ProcessEngine.subirResposta(params);
+  return resultado;
 }
 
 export async function prepararSaida(params: { municipioId: string; processoId: string; executorId: string; observacao?: string }) {
@@ -385,7 +380,6 @@ export async function despacharSaida(params: {
   observacao?: string;
 }) {
   const resultado = await ProcessEngine.despacharSaida(params);
-  const descricao = params.autorizar ? "Saída autorizada" : "Saída não autorizada";
   return resultado;
 }
 

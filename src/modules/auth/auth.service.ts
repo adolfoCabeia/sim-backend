@@ -275,9 +275,11 @@ export async function confirmEmail(rawToken: string): Promise<void> {
 
   /*
    * O token é o ponto de entrada do fluxo e ainda não temos municipioId.
-   * Primeiro precisamos localizar o token.
+   * Localizamos o token E o município do utilizador associado numa única
+   * ida ao bypass (antes eram duas transações separadas: uma para o
+   * token, outra só para descobrir o municipioId).
    */
-  const tokenData = await withAuthBypass(
+  const { tokenRecord, municipioId } = await withAuthBypass(
     async (tx: Prisma.TransactionClient) => {
       const tokenRecord = await tx.emailConfirmationToken.findUnique({
         where: { tokenHash },
@@ -301,7 +303,12 @@ export async function confirmEmail(rawToken: string): Promise<void> {
         );
       }
 
-      return tokenRecord;
+      const utilizador = await tx.utilizador.findUniqueOrThrow({
+        where: { id: tokenRecord.utilizadorId },
+        select: { municipioId: true },
+      });
+
+      return { tokenRecord, municipioId: utilizador.municipioId };
     }
   );
 
@@ -310,22 +317,15 @@ export async function confirmEmail(rawToken: string): Promise<void> {
    * Daqui em diante usamos o contexto normal de tenant.
    */
   await withTenantTransaction(
-    (
-      await withAuthBypass((tx: Prisma.TransactionClient) =>
-        tx.utilizador.findUniqueOrThrow({
-          where: { id: tokenData.utilizadorId },
-          select: { municipioId: true },
-        })
-      )
-    ).municipioId,
+    municipioId,
     async (tx: Prisma.TransactionClient) => {
       await tx.emailConfirmationToken.update({
-        where: { id: tokenData.id },
+        where: { id: tokenRecord.id },
         data: { usadoEm: new Date() },
       });
 
       await tx.utilizador.update({
-        where: { id: tokenData.utilizadorId },
+        where: { id: tokenRecord.utilizadorId },
         data: {
           emailConfirmado: true,
           emailConfirmadoEm: new Date(),
@@ -333,7 +333,7 @@ export async function confirmEmail(rawToken: string): Promise<void> {
       });
 
       const utilizador = await tx.utilizador.findUniqueOrThrow({
-        where: { id: tokenData.utilizadorId },
+        where: { id: tokenRecord.utilizadorId },
       });
 
       await tx.logAuditoria.create({
@@ -507,31 +507,32 @@ export async function loginUser(
   }
 
   const refreshToken = await issueRefreshToken({
-  utilizadorId: utilizador.id,
-  municipioId: utilizador.municipioId,
-  ...(context.ipOrigem !== undefined && {
-    ipOrigem: context.ipOrigem,
-  }),
-  ...(context.userAgent !== undefined && {
-    userAgent: context.userAgent,
-  }),
-});
-  await withTenantTransaction(
-  utilizador.municipioId,
-  (tx) =>
-    tx.logAuditoria.create({
-      data: {
-        municipioId: utilizador.municipioId,
-        utilizadorId: utilizador.id,
-        accao: "LOGIN_SUCESSO",
-        entidade: "Utilizador",
-        entidadeId: utilizador.id,
-        ...(context.ipOrigem !== undefined && {
-          ipOrigem: context.ipOrigem,
-        }),
-      },
+    utilizadorId: utilizador.id,
+    municipioId: utilizador.municipioId,
+    ...(context.ipOrigem !== undefined && {
+      ipOrigem: context.ipOrigem,
     }),
-);
+    ...(context.userAgent !== undefined && {
+      userAgent: context.userAgent,
+    }),
+  });
+
+  await withTenantTransaction(
+    utilizador.municipioId,
+    (tx) =>
+      tx.logAuditoria.create({
+        data: {
+          municipioId: utilizador.municipioId,
+          utilizadorId: utilizador.id,
+          accao: "LOGIN_SUCESSO",
+          entidade: "Utilizador",
+          entidadeId: utilizador.id,
+          ...(context.ipOrigem !== undefined && {
+            ipOrigem: context.ipOrigem,
+          }),
+        },
+      }),
+  );
 
   return {
     utilizador: {
@@ -649,34 +650,41 @@ export async function initiateMfaSetup(params: {
     generateMfaQrCodeDataUrl,
   } = await import("./mfa.service.js");
 
-  return withTenantTransaction(
+  /*
+   * A leitura do utilizador precisa de tenant context, mas a geração do
+   * segredo e do QR code não tocam a BD — geram-se fora da transação para
+   * não segurar a conexão/locks durante trabalho que não é de BD.
+   */
+  const utilizador = await withTenantTransaction(
     params.municipioId,
-    async (tx: Prisma.TransactionClient) => {
-      const utilizador = await tx.utilizador.findUniqueOrThrow({
+    (tx: Prisma.TransactionClient) =>
+      tx.utilizador.findUniqueOrThrow({
         where: { id: params.utilizadorId },
-      });
+      })
+  );
 
-      const secret = generateMfaSecret();
+  const secret = generateMfaSecret();
 
-      const otpUri = generateMfaQrCodeUri({
-        secret,
-        accountEmail: utilizador.email,
-      });
+  const otpUri = generateMfaQrCodeUri({
+    secret,
+    accountEmail: utilizador.email,
+  });
 
-      const qrCodeDataUrl =
-        await generateMfaQrCodeDataUrl(otpUri);
+  const qrCodeDataUrl = await generateMfaQrCodeDataUrl(otpUri);
 
-      await tx.utilizador.update({
+  await withTenantTransaction(
+    params.municipioId,
+    (tx: Prisma.TransactionClient) =>
+      tx.utilizador.update({
         where: { id: params.utilizadorId },
         data: { mfaSecret: secret },
-      });
-
-      return {
-        qrCodeDataUrl,
-        secret,
-      };
-    }
+      })
   );
+
+  return {
+    qrCodeDataUrl,
+    secret,
+  };
 }
 
 export async function confirmMfaSetup(params: {
@@ -808,36 +816,47 @@ export async function requestPasswordReset(
     }
   );
 
+  /*
+   * O envio do email acontece FORA da transação acima (que já terminou),
+   * mas é AGUARDADO (await) antes de a função devolver a resposta ao
+   * chamador. Antes, esta chamada era "fire-and-forget" (.then/.catch sem
+   * await): num ambiente que hiberna/escala a zero logo depois do pedido
+   * HTTP terminar, a promise podia nunca chegar a correr, e o email de
+   * recuperação de password simplesmente não era enviado, sem log de erro
+   * nenhum. Agora garantimos que o envio é sempre tentado antes de
+   * responder, mantendo a falha isolada (não afeta o resultado devolvido
+   * ao utilizador, que por segurança é sempre "EMAIL_ENVIADO" independente
+   * de o envio ter tido sucesso, para não revelar quais emails existem).
+   */
   if (resultado.estado === "EMAIL_ENVIADO") {
     const resetUrl =
       `${env.FRONTEND_URL}/redefinir-password?token=${resultado.rawToken}`;
 
-    withTenantTransaction(
-      resultado.utilizador.municipioId,
-      (tx: Prisma.TransactionClient) =>
-        tx.municipio.findUniqueOrThrow({
-          where: {
-            id: resultado.utilizador.municipioId,
-          },
-          select: { nome: true },
-        })
-    )
-      .then((municipio: { nome: string }) =>
-        sendPasswordResetEmail({
-          to: resultado.utilizador.email,
-          toName: resultado.utilizador.nomeCompleto,
-          municipioNome: municipio.nome,
-          resetUrl,
-          expiresInHours:
-            env.PASSWORD_RESET_EXPIRES_IN_HOURS,
-        })
-      )
-      .catch((error: unknown) => {
-        console.error(
-          "Falha ao enviar email de recuperação de password:",
-          error
-        );
+    try {
+      const municipio = await withTenantTransaction(
+        resultado.utilizador.municipioId,
+        (tx: Prisma.TransactionClient) =>
+          tx.municipio.findUniqueOrThrow({
+            where: {
+              id: resultado.utilizador.municipioId,
+            },
+            select: { nome: true },
+          })
+      );
+
+      await sendPasswordResetEmail({
+        to: resultado.utilizador.email,
+        toName: resultado.utilizador.nomeCompleto,
+        municipioNome: municipio.nome,
+        resetUrl,
+        expiresInHours: env.PASSWORD_RESET_EXPIRES_IN_HOURS,
       });
+    } catch (error) {
+      console.error(
+        "Falha ao enviar email de recuperação de password:",
+        error
+      );
+    }
   }
 
   return {

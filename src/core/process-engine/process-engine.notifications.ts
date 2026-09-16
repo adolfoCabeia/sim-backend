@@ -6,8 +6,8 @@ export async function notificarCidadaoSubmissao(
   tx: Prisma.TransactionClient,
   params: {
     requerenteId: string;
-    email: string;
-    nomeCompleto: string;
+    email?: string | null | undefined;
+    nomeCompleto?: string | null | undefined;
     telefone?: string | null | undefined;
     numeroProcesso: string;
     processoId: string;
