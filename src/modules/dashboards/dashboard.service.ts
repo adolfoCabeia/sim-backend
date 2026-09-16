@@ -60,7 +60,7 @@ export async function obterDashboardDireccao(municipioId: string, direcaoId: str
         },
       }),
       tx.documento.count({ where: { pasta: { direcaoId } } }),
-      tx.funcionario.count({ where: { estado: "ATIVO", direcaoId } }), // ← CORRIGIDO AQUI
+      tx.funcionario.count({ where: { estado: "ATIVO", direcaoId } }),
     ]);
 
     return {
@@ -120,7 +120,6 @@ export async function obterDashboardAdministrador(municipioId: string) {
   });
 }
 
-// ─── Painel de Transparência (público, secção 19.4) ───
 
 export async function obterPainelTransparencia(municipioId: string) {
   const municipio = await prisma.municipio.findUnique({

@@ -25,11 +25,6 @@ function adicionarDias(data: Date, dias: number): Date {
   return copia;
 }
 
-/** Fragmento SQL comum: junta pagamentos -> processos_genericos -> servicos, filtrado
- * por município, estado PAGO, o intervalo de datas e (quando aplicável) o âmbito de
- * direcções que o utilizador pode ver. A RLS de cada tabela já impõe o isolamento por
- * município de forma independente; o filtro explícito aqui é apenas defesa em
- * profundidade. */
 async function construirFiltro(params: FiltroPeriodo, intervalo: { inicio: Date; fim: Date }) {
   const ambito = await resolverAmbito({
     municipioId: params.municipioId,

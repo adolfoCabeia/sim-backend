@@ -11,6 +11,38 @@ import { storageService } from "../storage/storage.service.js";
 import { notificarUtilizador } from "../../core/notifications/notification.service.js";
 import { emitirNovaMensagem,emitirMensagensLidas, emitirMudancaEstado, emitirAtribuicao } from "./ocorrencia.realtime.js";
 
+/*
+ * ── NOTA SOBRE NOTIFICAÇÕES E EVENTOS EM TEMPO REAL ─────────────────────
+ * `notificarUtilizador` faz I/O de rede (envia email quando recebe
+ * emailDestino). Tal como no motor de processos, NUNCA deve correr dentro
+ * da transação de escrita do negócio: se a rede demorar, a transação
+ * (timeout curto) expira e o commit falha com P2028, mesmo já com as
+ * escritas prontas.
+ *
+ * Além disso, os eventos de tempo real (`emitirX`) também não devem ser
+ * disparados de dentro da transação: se um passo posterior dentro do
+ * mesmo bloco falhar, a transação é revertida, mas o evento já terá sido
+ * enviado aos clientes — que passam a ver no ecrã uma mudança de estado
+ * ou atribuição que nunca chegou a ser persistida na BD.
+ *
+ * Padrão adotado abaixo: a transação só lê/escreve na BD e devolve dados
+ * simples; notificação e eventos em tempo real disparam depois do commit,
+ * com a notificação protegida por try/catch (uma falha de envio nunca
+ * desfaz nem falha a ação de negócio já concluída).
+ */
+async function dispararNotificacao(
+  municipioId: string,
+  contexto: string,
+  fn: (tx: Parameters<Parameters<typeof withTenantTransaction>[1]>[0]) => Promise<void>
+): Promise<void> {
+  try {
+    await withTenantTransaction(municipioId, fn);
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error(`[notificacao] Falha ao notificar (${contexto}):`, err);
+  }
+}
+
 async function gerarNumero(municipioId: string, tx: any) {
   const ano = new Date().getFullYear();
   const total = await tx.ocorrencia.count({ where: { municipioId } });
@@ -237,7 +269,14 @@ export async function responderOcorrencia(params: {
   autorId: string;
   input: ResponderOcorrenciaInput;
 }) {
-  return prisma.$transaction(async (tx) => {
+  // 1) Transação: só leituras/escritas de negócio. Nada de rede aqui.
+  const {
+    mensagem,
+    numeroOcorrencia,
+    deveAtribuir,
+    atribuidoNome,
+    destinatarioParaNotificar,
+  } = await prisma.$transaction(async (tx) => {
     const ocorrencia = await tx.ocorrencia.findFirst({
       where: { id: params.ocorrenciaId, municipioId: params.municipioId },
     });
@@ -256,7 +295,6 @@ export async function responderOcorrencia(params: {
         where: { id: params.ocorrenciaId },
         data: { responsavelId: params.autorId },
       });
-      emitirAtribuicao(ocorrencia.id, mensagem.autor.nomeCompleto);
     }
 
     const destinatarioId = ehCriador
@@ -264,36 +302,69 @@ export async function responderOcorrencia(params: {
       : ocorrencia.criadoPorId;
 
     // Se for o criador a responder e ainda não há responsável, não há para quem notificar.
+    let destinatarioParaNotificar: {
+      utilizadorDestinoId: string;
+      email: string | null;
+      nomeCompleto: string | null;
+    } | null = null;
+
     if (destinatarioId && destinatarioId !== params.autorId) {
       const destinatario = await tx.utilizador.findUnique({
         where: { id: destinatarioId },
         select: { email: true, nomeCompleto: true },
       });
-
-      await notificarUtilizador(tx, {
+      destinatarioParaNotificar = {
         utilizadorDestinoId: destinatarioId,
-        titulo: `Nova mensagem em ${ocorrencia.numero}`,
-        mensagem:
-          params.input.mensagem.length > 140
-            ? `${params.input.mensagem.slice(0, 140)}…`
-            : params.input.mensagem,
-        tipo: "OCORRENCIA_MENSAGEM",
-        metadata: { ocorrenciaId: ocorrencia.id },
-        emailDestino: destinatario?.email,
-        nomeDestino: destinatario?.nomeCompleto,
-      });
+        email: destinatario?.email ?? null,
+        nomeCompleto: destinatario?.nomeCompleto ?? null,
+      };
     }
 
-    emitirNovaMensagem(ocorrencia.id, {
-      id: mensagem.id,
-      mensagem: mensagem.mensagem,
-      autorId: mensagem.autorId,
-      autorNome: mensagem.autor.nomeCompleto,
-      criadoEm: mensagem.criadoEm,
-    });
-
-    return mensagem;
+    return {
+      mensagem,
+      numeroOcorrencia: ocorrencia.numero,
+      deveAtribuir,
+      atribuidoNome: mensagem.autor.nomeCompleto,
+      destinatarioParaNotificar,
+    };
   });
+
+  // 2) Efeitos fora da transação: eventos em tempo real e notificação,
+  //    só depois de a escrita estar de facto confirmada na BD.
+  if (deveAtribuir) {
+    emitirAtribuicao(params.ocorrenciaId, atribuidoNome);
+  }
+
+  if (destinatarioParaNotificar) {
+    await dispararNotificacao(
+      params.municipioId,
+      `responderOcorrencia:${params.ocorrenciaId}`,
+      async (tx) => {
+        await notificarUtilizador(tx, {
+          utilizadorDestinoId: destinatarioParaNotificar.utilizadorDestinoId,
+          titulo: `Nova mensagem em ${numeroOcorrencia}`,
+          mensagem:
+            params.input.mensagem.length > 140
+              ? `${params.input.mensagem.slice(0, 140)}…`
+              : params.input.mensagem,
+          tipo: "OCORRENCIA_MENSAGEM",
+          metadata: { ocorrenciaId: params.ocorrenciaId },
+          emailDestino: destinatarioParaNotificar.email,
+          nomeDestino: destinatarioParaNotificar.nomeCompleto,
+        });
+      }
+    );
+  }
+
+  emitirNovaMensagem(params.ocorrenciaId, {
+    id: mensagem.id,
+    mensagem: mensagem.mensagem,
+    autorId: mensagem.autorId,
+    autorNome: mensagem.autor.nomeCompleto,
+    criadoEm: mensagem.criadoEm,
+  });
+
+  return mensagem;
 }
 
 export async function mudarEstadoOcorrencia(params: {
@@ -301,7 +372,8 @@ export async function mudarEstadoOcorrencia(params: {
   municipioId: string;
   input: MudarEstadoOcorrenciaInput;
 }) {
-  return prisma.$transaction(async (tx) => {
+  // 1) Transação: só leituras/escritas de negócio.
+  const { atualizada, numeroOcorrencia, destinatarioParaNotificar } = await prisma.$transaction(async (tx) => {
     const ocorrencia = await tx.ocorrencia.findFirst({
       where: { id: params.ocorrenciaId, municipioId: params.municipioId },
     });
@@ -317,20 +389,37 @@ export async function mudarEstadoOcorrencia(params: {
       select: { email: true, nomeCompleto: true },
     });
 
-    await notificarUtilizador(tx, {
-      utilizadorDestinoId: ocorrencia.criadoPorId,
-      titulo: `Ocorrência ${ocorrencia.numero} atualizada`,
-      mensagem: params.input.observacao
-        ? `Novo estado: ${params.input.estado}. ${params.input.observacao}`
-        : `A tua ocorrência passou para o estado ${params.input.estado}.`,
-      tipo: "OCORRENCIA_ATUALIZADA",
-      metadata: { ocorrenciaId: ocorrencia.id },
-      emailDestino: destinatario?.email,
-      nomeDestino: destinatario?.nomeCompleto,
-    });
-
-    emitirMudancaEstado(ocorrencia.id, params.input.estado);
-
-    return atualizada;
+    return {
+      atualizada,
+      numeroOcorrencia: ocorrencia.numero,
+      destinatarioParaNotificar: {
+        utilizadorDestinoId: ocorrencia.criadoPorId,
+        email: destinatario?.email ?? null,
+        nomeCompleto: destinatario?.nomeCompleto ?? null,
+      },
+    };
   });
+
+  // 2) Efeitos fora da transação, só depois da escrita confirmada na BD.
+  await dispararNotificacao(
+    params.municipioId,
+    `mudarEstadoOcorrencia:${params.ocorrenciaId}`,
+    async (tx) => {
+      await notificarUtilizador(tx, {
+        utilizadorDestinoId: destinatarioParaNotificar.utilizadorDestinoId,
+        titulo: `Ocorrência ${numeroOcorrencia} atualizada`,
+        mensagem: params.input.observacao
+          ? `Novo estado: ${params.input.estado}. ${params.input.observacao}`
+          : `A tua ocorrência passou para o estado ${params.input.estado}.`,
+        tipo: "OCORRENCIA_ATUALIZADA",
+        metadata: { ocorrenciaId: params.ocorrenciaId },
+        emailDestino: destinatarioParaNotificar.email,
+        nomeDestino: destinatarioParaNotificar.nomeCompleto,
+      });
+    }
+  );
+
+  emitirMudancaEstado(params.ocorrenciaId, params.input.estado);
+
+  return atualizada;
 }
