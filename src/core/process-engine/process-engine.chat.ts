@@ -134,16 +134,22 @@ export async function enviarMensagemProcesso(params: {
     });
   }
 
-  emitirMensagemProcesso(params.processoId, {
-    id: mensagem.id,
-    mensagem: mensagem.mensagem ?? '',
-    autorId: mensagem.autorId,
-    autorNome: mensagem.autor.nomeCompleto,
-    criadoEm: mensagem.criadoEm,
-  });
+  const anexoUrl = mensagem.anexoStorageKey
+  ? await gerarUrlVisualizacao(mensagem.anexoStorageKey, 3600)
+  : null;
 
-  const anexoUrl = mensagem.anexoStorageKey ? await gerarUrlVisualizacao(mensagem.anexoStorageKey, 3600) : null;
-  return { ...mensagem, anexoUrl };
+emitirMensagemProcesso(params.processoId, {
+  id: mensagem.id,
+  mensagem: mensagem.mensagem ?? '',
+  autorId: mensagem.autorId,
+  autorNome: mensagem.autor.nomeCompleto,
+  criadoEm: mensagem.criadoEm,
+  anexoUrl,
+  anexoNomeFicheiro: mensagem.anexoNomeFicheiro ?? null,
+  anexoMimeType: mensagem.anexoMimeType ?? null,
+});
+
+return { ...mensagem, anexoUrl };
 }
 
 export async function contarNaoLidasProcesso(params: { municipioId: string; processoId: string; viewerId: string }) {

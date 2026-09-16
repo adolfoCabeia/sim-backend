@@ -14,6 +14,20 @@ export class PagamentoJaProcessadoError extends Error {}
 export class PagamentoNaoAutorizadoError extends Error {}
 export class PagamentoExpiradoError extends Error {}
 
+
+async function dispararNotificacao(
+  municipioId: string,
+  contexto: string,
+  fn: (tx: Prisma.TransactionClient) => Promise<void>
+): Promise<void> {
+  try {
+    await withTenantTransaction(municipioId, fn);
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error(`[notificacao] Falha ao notificar (${contexto}):`, err);
+  }
+}
+
 async function obterPagamentoOuFalhar(tx: Prisma.TransactionClient, pagamentoId: string) {
   const pagamento = await tx.pagamento.findUnique({ where: { id: pagamentoId } });
   if (!pagamento) {
@@ -107,7 +121,8 @@ export async function confirmarPagamento(params: {
   executorId: string;
   input: ConfirmarPagamentoInput;
 }) {
-  return withTenantTransaction(params.municipioId, async (tx) => {
+  // 1) Transação: só leituras/escritas de negócio. Nada de rede aqui.
+  const { actualizado, requerenteParaNotificar } = await withTenantTransaction(params.municipioId, async (tx) => {
     const pagamento = await obterPagamentoOuFalhar(tx, params.pagamentoId);
     if (pagamento.estado !== "PENDENTE") {
       throw new PagamentoJaProcessadoError(
@@ -116,101 +131,101 @@ export async function confirmarPagamento(params: {
     }
 
     // 1. Atualizar pagamento
-    let actualizado;
-    try {
-      actualizado = await tx.pagamento.update({
-        where: { id: pagamento.id },
-        data: {
-          estado: "PAGO",
-          pagoEm: new Date(),
-          criadoPorId: pagamento.criadoPorId ?? params.executorId,
-          metadadosConfirmacao: {
-            confirmadoPorId: params.executorId,
-            ...(params.input.meioPagamento !== undefined && { meioPagamento: params.input.meioPagamento }),
-            ...(params.input.observacao !== undefined && { observacao: params.input.observacao }),
-            ...(params.input.metadados ?? {}),
-          } as Prisma.InputJsonValue,
-        },
-      });
-    } catch (e: any) {
-      console.error("[DEBUG] Erro no tx.pagamento.update:", e.message);
-      throw new Error(`Falha ao atualizar pagamento: ${e.message}`);
-    }
+    const actualizado = await tx.pagamento.update({
+      where: { id: pagamento.id },
+      data: {
+        estado: "PAGO",
+        pagoEm: new Date(),
+        criadoPorId: pagamento.criadoPorId ?? params.executorId,
+        metadadosConfirmacao: {
+          confirmadoPorId: params.executorId,
+          ...(params.input.meioPagamento !== undefined && { meioPagamento: params.input.meioPagamento }),
+          ...(params.input.observacao !== undefined && { observacao: params.input.observacao }),
+          ...(params.input.metadados ?? {}),
+        } as Prisma.InputJsonValue,
+      },
+    });
 
     // 2. Atualizar processo
-    let processo;
-    try {
-      processo = await tx.processoGenerico.update({
-        where: { id: pagamento.processoId },
-        data: { aguardaPagamento: false },
-        select: { id: true, numero: true, requerenteUtilizadorId: true, estado: true },
-      });
-    } catch (e: any) {
-      console.error("[DEBUG] Erro no tx.processoGenerico.update:", e.message);
-      throw new Error(`Falha ao atualizar processo: ${e.message}`);
-    }
+    const processo = await tx.processoGenerico.update({
+      where: { id: pagamento.processoId },
+      data: { aguardaPagamento: false },
+      select: { id: true, numero: true, requerenteUtilizadorId: true, estado: true },
+    });
 
     // 3. Criar transição
-    try {
-      await tx.processoGenericoTransicao.create({
-        data: {
-          processoId: processo.id,
-          estadoAnterior: processo.estado,
-          estadoNovo: processo.estado,
-          utilizadorId: params.executorId,
-          observacao: `Pagamento da referência ${pagamento.referencia} confirmado (${actualizado.valor.toString()} Kz). O processo já pode avançar.`,
-          visivelAoCidadao: true,
-        },
-      });
-    } catch (e: any) {
-      console.error("[DEBUG] Erro no tx.processoGenericoTransicao.create:", e.message);
-      throw new Error(`Falha ao criar transição: ${e.message}`);
-    }
+    await tx.processoGenericoTransicao.create({
+      data: {
+        processoId: processo.id,
+        estadoAnterior: processo.estado,
+        estadoNovo: processo.estado,
+        utilizadorId: params.executorId,
+        observacao: `Pagamento da referência ${pagamento.referencia} confirmado (${actualizado.valor.toString()} Kz). O processo já pode avançar.`,
+        visivelAoCidadao: true,
+      },
+    });
 
     // 4. Log auditoria
-    try {
-      await tx.logAuditoria.create({
-        data: {
-          municipioId: params.municipioId,
-          utilizadorId: params.executorId,
-          accao: "PAGAMENTO_CONFIRMADO",
-          entidade: "Pagamento",
-          entidadeId: pagamento.id,
-          detalhes: { processoId: processo.id, referencia: pagamento.referencia, valor: actualizado.valor.toString() },
-        },
-      });
-    } catch (e: any) {
-      console.error("[DEBUG] Erro no tx.logAuditoria.create:", e.message);
-      throw new Error(`Falha ao criar log: ${e.message}`);
-    }
+    await tx.logAuditoria.create({
+      data: {
+        municipioId: params.municipioId,
+        utilizadorId: params.executorId,
+        accao: "PAGAMENTO_CONFIRMADO",
+        entidade: "Pagamento",
+        entidadeId: pagamento.id,
+        detalhes: { processoId: processo.id, referencia: pagamento.referencia, valor: actualizado.valor.toString() },
+      },
+    });
 
-    // 5. Notificação
+    let requerenteParaNotificar: {
+      utilizadorDestinoId: string;
+      email: string | null;
+      emailConfirmado: boolean;
+      nomeCompleto: string | null;
+      telefone: string | null;
+    } | null = null;
+
     if (processo.requerenteUtilizadorId) {
-      try {
-        const requerente = await tx.utilizador.findUnique({
-          where: { id: processo.requerenteUtilizadorId },
-          select: { email: true, nomeCompleto: true, telefone: true, emailConfirmado: true },
-        });
-        if (requerente) {
-          await notificarUtilizador(tx, {
-            utilizadorDestinoId: processo.requerenteUtilizadorId,
-            titulo: `Pagamento confirmado — Processo ${processo.numero}`,
-            mensagem: `Recebemos o seu pagamento da referência ${pagamento.referencia}. O seu processo ${processo.numero} já está a ser tratado.`,
-            tipo: "PROCESSO_ATUALIZADO",
-            metadata: { processoId: processo.id, numeroProcesso: processo.numero },
-            emailDestino: requerente.emailConfirmado ? requerente.email : null,
-            nomeDestino: requerente.nomeCompleto,
-            telefoneDestino: requerente.telefone,
-          });
-        }
-      } catch (e: any) {
-        console.error("[DEBUG] Erro na notificação:", e.message);
-        // Não falhar por causa de notificação
+      const requerente = await tx.utilizador.findUnique({
+        where: { id: processo.requerenteUtilizadorId },
+        select: { email: true, nomeCompleto: true, telefone: true, emailConfirmado: true },
+      });
+      if (requerente) {
+        requerenteParaNotificar = {
+          utilizadorDestinoId: processo.requerenteUtilizadorId,
+          email: requerente.email,
+          emailConfirmado: requerente.emailConfirmado,
+          nomeCompleto: requerente.nomeCompleto,
+          telefone: requerente.telefone,
+        };
       }
     }
 
-    return actualizado;
+    return {
+      actualizado,
+      requerenteParaNotificar: requerenteParaNotificar
+        ? { ...requerenteParaNotificar, numeroProcesso: processo.numero, processoId: processo.id, referencia: pagamento.referencia }
+        : null,
+    };
   });
+
+  // 2) Notificação: fora da transação de escrita, só depois do commit.
+  if (requerenteParaNotificar) {
+    await dispararNotificacao(params.municipioId, `confirmarPagamento:${params.pagamentoId}`, async (tx) => {
+      await notificarUtilizador(tx, {
+        utilizadorDestinoId: requerenteParaNotificar.utilizadorDestinoId,
+        titulo: `Pagamento confirmado, Processo ${requerenteParaNotificar.numeroProcesso}`,
+        mensagem: `Recebemos o seu pagamento da referência ${requerenteParaNotificar.referencia}. O seu processo ${requerenteParaNotificar.numeroProcesso} já está a ser tratado.`,
+        tipo: "PROCESSO_ATUALIZADO",
+        metadata: { processoId: requerenteParaNotificar.processoId, numeroProcesso: requerenteParaNotificar.numeroProcesso },
+        emailDestino: requerenteParaNotificar.emailConfirmado ? requerenteParaNotificar.email : null,
+        nomeDestino: requerenteParaNotificar.nomeCompleto,
+        telefoneDestino: requerenteParaNotificar.telefone,
+      });
+    });
+  }
+
+  return actualizado;
 }
 
 export async function ajustarValorPagamento(params: {

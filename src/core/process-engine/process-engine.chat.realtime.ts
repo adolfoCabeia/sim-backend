@@ -4,9 +4,23 @@ export function salaProcesso(processoId: string): string {
   return `processo:${processoId}`;
 }
 
+export interface MensagemProcesso {
+  id: string;
+  mensagem: string;
+  autorId: string;
+  autorNome: string;
+  criadoEm: Date;
+  /** Optional URL for an attached file */
+  anexoUrl?: string | null;
+  /** Optional file name of the attachment */
+  anexoNomeFicheiro?: string | null;
+  /** Optional MIME type of the attachment */
+  anexoMimeType?: string | null;
+}
+
 export function emitirMensagemProcesso(
   processoId: string,
-  mensagem: { id: string; mensagem: string; autorId: string; autorNome: string; criadoEm: Date }
+  mensagem: MensagemProcesso
 ): void {
   getIO()?.to(salaProcesso(processoId)).emit("processo:mensagem", {
     ...mensagem,
