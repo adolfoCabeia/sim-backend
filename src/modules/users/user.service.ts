@@ -5,7 +5,7 @@ import { logger } from "../../config/logger.js";
 import { hashPassword, verifyPassword } from "../auth/password.service.js";
 import { atribuirPerfilTx, revogarPerfil, getPerfisDoUtilizador } from "../auth/rbac/rbac.service.js";
 import { undefinedToNull } from "../../utils/optional.js";
-import { sendTemporaryPasswordEmail, sendContaInternaCriadaEmail } from "../email/email.service.js";
+import { sendTemporaryPasswordEmail, sendContaInternaCriadaEmail, sendComissaoCredenciaisEmail } from "../email/email.service.js";
 import { env } from "../../config/env.js";
 import type {
   ListarUtilizadoresQuery,
@@ -27,6 +27,7 @@ export class DepartamentoNaoEncontradoError extends Error { }
 export class DepartamentoSemDirecaoError extends Error { }
 export class SuperiorInvalidoError extends Error { }
 export class TipoContaNaoElegivelParaRedefinicaoError extends Error { }
+export class CamposOrganizacionaisNaoPermitidosError extends Error {}
 
 async function resolverDirecaoIdPorSigla(
   tx: Prisma.TransactionClient,
@@ -223,6 +224,21 @@ export async function criarUtilizador(params: {
     municipioAlvo = params.input.municipioId;
   }
 
+  // NOVO: direcaoSigla, departamentoNome e superiorId só fazem sentido
+  // para contas INTERNO — a Comissão de Moradores não pertence à estrutura
+  // organizacional municipal. Rejeitamos explicitamente em vez de ignorar
+  // em silêncio, para apanhar cedo qualquer chamada indevida (defesa em
+  // profundidade, mesmo que o formulário já não envie estes campos para
+  // COMISSAO_MORADORES).
+  if (
+    params.input.tipoConta !== "INTERNO" &&
+    (params.input.direcaoSigla || params.input.departamentoNome || params.input.superiorId)
+  ) {
+    throw new CamposOrganizacionaisNaoPermitidosError(
+      "direcaoSigla, departamentoNome e superiorId só se aplicam a contas do tipo INTERNO."
+    );
+  }
+
   const inicio = Date.now();
   const marcar = (etapa: string) =>
     logger.warn({ etapa, decorridoMs: Date.now() - inicio, email: params.input.email }, "criarUtilizador: checkpoint");
@@ -243,13 +259,17 @@ export async function criarUtilizador(params: {
     const passwordHash = await hashPassword(params.input.password);
     marcar("hash da password (argon2) concluído");
 
-    const direcaoId = params.input.direcaoSigla
-      ? await resolverDirecaoIdPorSigla(tx, municipioAlvo, params.input.direcaoSigla)
-      : undefined;
+    // NOVO: resolução de direcção/departamento/superior só corre para
+    // INTERNO — para COMISSAO_MORADORES estes campos já vêm undefined
+    // (validado acima), por isso o bloco simplesmente não se aplica.
+    const direcaoId =
+      params.input.tipoConta === "INTERNO" && params.input.direcaoSigla
+        ? await resolverDirecaoIdPorSigla(tx, municipioAlvo, params.input.direcaoSigla)
+        : undefined;
     marcar("resolução de direcção concluída");
 
     let departamentoId: string | undefined;
-    if (params.input.departamentoNome) {
+    if (params.input.tipoConta === "INTERNO" && params.input.departamentoNome) {
       if (!direcaoId) {
         throw new DepartamentoSemDirecaoError(
           "Para atribuir um departamento é preciso indicar também a direcaoSigla a que ele pertence."
@@ -259,7 +279,7 @@ export async function criarUtilizador(params: {
     }
     marcar("resolução de departamento concluída");
 
-    if (params.input.superiorId) {
+    if (params.input.tipoConta === "INTERNO" && params.input.superiorId) {
       const superior = await tx.utilizador.findUnique({
         where: { id: params.input.superiorId },
         select: { id: true },
@@ -278,17 +298,23 @@ export async function criarUtilizador(params: {
         passwordHash,
         tipoConta: params.input.tipoConta,
         estado: params.input.estado,
+        // NOVO: contas COMISSAO_MORADORES são criadas por um funcionário,
+        // tal como INTERNO — não passam por confirmação de email, apenas
+        // pelo estado indicado no formulário.
         emailConfirmado: params.input.estado === "ACTIVA",
         ...(direcaoId !== undefined && { direcaoId }),
         ...(departamentoId !== undefined && { departamentoId }),
-        ...(params.input.areaResponsabilidade !== undefined && {
-          areaResponsabilidade: params.input.areaResponsabilidade,
-        }),
-        ...(params.input.superiorId !== undefined && { superiorId: params.input.superiorId }),
+        ...(params.input.tipoConta === "INTERNO" &&
+          params.input.areaResponsabilidade !== undefined && {
+            areaResponsabilidade: params.input.areaResponsabilidade,
+          }),
+        ...(params.input.tipoConta === "INTERNO" &&
+          params.input.superiorId !== undefined && { superiorId: params.input.superiorId }),
       },
       select: SELECT_PUBLICO,
     });
     marcar("INSERT do utilizador concluído");
+
     if (params.input.tipoConta !== "INTERNO") {
       const perfilCorrespondente = await tx.perfil.findFirst({
         where: { nome: params.input.tipoConta, activo: true },
@@ -311,15 +337,22 @@ export async function criarUtilizador(params: {
         entidadeId: utilizador.id,
         detalhes: {
           estadoInicial: params.input.estado,
+          tipoConta: params.input.tipoConta,
           ...(municipioAlvo !== params.municipioId && { criadoForaDoProprioMunicipio: true }),
         },
       },
     });
     marcar("log de auditoria concluído (transacção prestes a fazer commit)");
 
-    // Só a leitura do nome do município fica aqui dentro (aproveita a
-    // mesma ligação, é barato) — o envio do email em si fica lá fora.
-    if (params.input.tipoConta === "INTERNO" && params.input.direcaoSigla) {
+    // NOVO: a leitura do nome do município passa a acontecer para
+    // qualquer tipo de conta que precise de email de boas-vindas com
+    // password (INTERNO com direcção, ou COMISSAO_MORADORES), não só
+    // para INTERNO.
+    const precisaNomeMunicipio =
+      (params.input.tipoConta === "INTERNO" && !!params.input.direcaoSigla) ||
+      params.input.tipoConta === "COMISSAO_MORADORES";
+
+    if (precisaNomeMunicipio) {
       const municipio = await tx.municipio.findUniqueOrThrow({
         where: { id: municipioAlvo },
         select: { nome: true },
@@ -330,6 +363,7 @@ export async function criarUtilizador(params: {
     return utilizador;
   });
 
+  // NOVO: email de boas-vindas consoante o tipo de conta criado.
   if (params.input.tipoConta === "INTERNO" && params.input.direcaoSigla && municipioNome) {
     try {
       await sendContaInternaCriadaEmail({
@@ -341,6 +375,20 @@ export async function criarUtilizador(params: {
       });
     } catch (error) {
       console.error("Falha ao enviar email de conta interna criada (admin):", error);
+    }
+  }
+
+  if (params.input.tipoConta === "COMISSAO_MORADORES" && municipioNome) {
+    try {
+      await sendComissaoCredenciaisEmail({
+        to: utilizador.email,
+        toName: utilizador.nomeCompleto,
+        municipioNome,
+        password: params.input.password,
+        loginUrl: `${env.FRONTEND_URL}/login`,
+      });
+    } catch (error) {
+      console.error("Falha ao enviar email de credenciais da comissão (admin):", error);
     }
   }
 
