@@ -1,5 +1,13 @@
 import type { Prisma } from "../../generated/prisma/client.js";
-import { notificarUtilizador, notificarMultiplos } from "../notifications/notification.service.js";
+import {
+  notificarUtilizador,
+  notificarMultiplos,
+  type EnviosPendentes,
+} from "../notifications/notification.service.js";
+// TODO: `notificarGam` tem de ser actualizado em gam-notifications.js para
+// devolver EnviosPendentes (ou EnviosPendentes[], se notificar vários
+// utilizadores) em vez de enviar o email internamente — ver nota no fim
+// do ficheiro process-engine.service.ts corrigido.
 import { notificarGam } from "../notifications/gam-notifications.js";
 
 export async function notificarCidadaoSubmissao(
@@ -13,12 +21,12 @@ export async function notificarCidadaoSubmissao(
     processoId: string;
     servicoNome?: string | undefined;
   }
-): Promise<void> {
+): Promise<EnviosPendentes> {
   const mensagem = params.servicoNome
     ? `O seu pedido do serviço "${params.servicoNome}" foi submetido com sucesso. O número do processo é ${params.numeroProcesso}.`
     : `O seu pedido foi submetido com sucesso. O número do processo é ${params.numeroProcesso}.`;
 
-  await notificarUtilizador(tx, {
+  return notificarUtilizador(tx, {
     utilizadorDestinoId: params.requerenteId,
     titulo: `Processo ${params.numeroProcesso} submetido`,
     mensagem,
@@ -43,8 +51,8 @@ export async function notificarCidadaoTransicao(
     estadoNovo: string;
     observacao?: string | null | undefined;
   }
-): Promise<void> {
-  await notificarUtilizador(tx, {
+): Promise<EnviosPendentes> {
+  return notificarUtilizador(tx, {
     utilizadorDestinoId: params.requerenteId,
     titulo: `Processo ${params.numeroProcesso} — ${params.estadoNovo}`,
     mensagem: params.observacao ?? `O seu processo mudou de estado para "${params.estadoNovo}".`,
@@ -67,8 +75,8 @@ export async function notificarAtribuicao(
     processoId: string;
     atribuidoPorNome: string;
   }
-): Promise<void> {
-  await notificarUtilizador(tx, {
+): Promise<EnviosPendentes> {
+  return notificarUtilizador(tx, {
     utilizadorDestinoId: params.funcionarioId,
     titulo: `Processo ${params.numeroProcesso} atribuído a si`,
     mensagem: `${params.atribuidoPorNome} atribuiu-lhe o processo ${params.numeroProcesso} para tratamento.`,
@@ -79,6 +87,7 @@ export async function notificarAtribuicao(
     canais: ["APP", "EMAIL"],
   });
 }
+
 export async function notificarAcaoProcesso(
   tx: Prisma.TransactionClient,
   params: {
@@ -93,9 +102,10 @@ export async function notificarAcaoProcesso(
       nomeCompleto?: string | null;
     }>;
   }
-): Promise<void> {
+): Promise<EnviosPendentes[]> {
+  const pendentes: EnviosPendentes[] = [];
   for (const dest of params.destinatarios) {
-    await notificarUtilizador(tx, {
+    const p = await notificarUtilizador(tx, {
       utilizadorDestinoId: dest.utilizadorId,
       titulo: params.titulo,
       mensagem: params.mensagem,
@@ -105,7 +115,9 @@ export async function notificarAcaoProcesso(
       nomeDestino: dest.nomeCompleto,
       canais: ["APP", "EMAIL"],
     });
+    pendentes.push(p);
   }
+  return pendentes;
 }
 
 export { notificarUtilizador, notificarGam };

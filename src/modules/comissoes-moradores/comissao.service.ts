@@ -1,17 +1,34 @@
-/**
- * Cadastro de Comissão de Moradores (secção 10.5 do documento técnico).
- * ANTES DESTA ALTERAÇÃO: só existiam 2 campos soltos em `Utilizador`
- * (`nomeComissao`, `cargoComissao`) — não havia bairro/coordenadas
- * territoriais, membros, documentação legal, nem estado da comissão.
- *
- * ISOLAMENTO MULTI-TENANT: `comissoes_moradores` e `membros_comissao` têm
- * RLS (ver prisma/enable_rls.sql) — `municipioId` é obrigatório em todas
- * as funções e é sempre o primeiro argumento de `withTenantTransaction`.
- */
-
 import type { Prisma } from "../../generated/prisma/client.js";
 import { withTenantTransaction } from "../../config/prisma.js";
-import type { ComissaoCreateInput, ComissaoUpdateInput, AdicionarMembroInput } from "./comissao.schema.js";
+import { revokeAllRefreshTokens } from "../auth/jwt.service.js";
+import type {
+  ComissaoCreateInput,
+  ComissaoUpdateInput,
+  AlterarEstadoComissaoInput,
+  AdicionarMembroInput,
+} from "./comissao.schema.js";
+
+export class ComissaoNaoEncontradaError extends Error {}
+export class MembroNaoPertenceAComissaoError extends Error {}
+export class TransicaoDeEstadoInvalidaError extends Error {}
+// NOVO
+export class UtilizadorInvalidoParaComissaoError extends Error {}
+export class UtilizadorJaTemComissaoError extends Error {}
+
+const TRANSICOES_PERMITIDAS: Record<string, readonly string[]> = {
+  EM_REGULARIZACAO: ["ACTIVA", "INACTIVA"],
+  ACTIVA: ["INACTIVA"],
+  INACTIVA: ["EM_REGULARIZACAO", "ACTIVA"],
+};
+
+const UTILIZADOR_SELECT_SEGURO = {
+  id: true,
+  email: true,
+  estado: true,
+  online: true,
+  ultimoLoginEm: true,
+  deveTrocarPassword: true,
+} as const;
 
 export async function listarComissoes(
   filtros: { municipioId: string; bairro?: string | undefined; estado?: string | undefined },
@@ -20,7 +37,9 @@ export async function listarComissoes(
   const skip = (paginacao.page - 1) * paginacao.limit;
   const where: Prisma.ComissaoModeradoresWhereInput = {
     ...(filtros.bairro && { bairro: { contains: filtros.bairro, mode: "insensitive" } }),
-    ...(filtros.estado && { estado: filtros.estado as Prisma.EnumEstadoComissaoModeradoresFilter<"ComissaoModeradores"> }),
+    ...(filtros.estado && {
+      estado: filtros.estado as Prisma.EnumEstadoComissaoModeradoresFilter<"ComissaoModeradores">,
+    }),
   };
 
   return withTenantTransaction(filtros.municipioId, async (tx) => {
@@ -30,7 +49,11 @@ export async function listarComissoes(
         skip,
         take: paginacao.limit,
         orderBy: { bairro: "asc" },
-        include: { membros: true, _count: { select: { ocorrencias: true } } },
+        include: {
+          membros: true,
+          utilizador: { select: UTILIZADOR_SELECT_SEGURO },
+          _count: { select: { ocorrencias: true } },
+        },
       }),
       tx.comissaoModeradores.count({ where }),
     ]);
@@ -40,21 +63,57 @@ export async function listarComissoes(
 
 export async function obterComissao(id: string, municipioId: string) {
   return withTenantTransaction(municipioId, async (tx) => {
-    return tx.comissaoModeradores.findUnique({
+    const comissao = await tx.comissaoModeradores.findUnique({
       where: { id },
-      include: { membros: true, ocorrencias: { orderBy: { criadoEm: "desc" }, take: 20 } },
+      include: {
+        membros: true,
+        utilizador: { select: UTILIZADOR_SELECT_SEGURO },
+        ocorrencias: { orderBy: { criadoEm: "desc" }, take: 20 },
+      },
     });
+    if (!comissao) throw new ComissaoNaoEncontradaError("Comissão não encontrada.");
+    return comissao;
   });
 }
 
-export async function criarComissao(municipioId: string, dados: ComissaoCreateInput) {
+/**
+ * NOVO: a comissão liga-se a um Utilizador JÁ EXISTENTE (tipoConta
+ * COMISSAO_MORADORES), em vez de criar email/password aqui — mesmo padrão
+ * do módulo de Funcionários (ficha ligada a um utilizadorId pesquisado).
+ * A conta é criada antes, por um fluxo administrativo de contas.
+ */
+export async function criarComissao(
+  municipioId: string,
+  dados: ComissaoCreateInput,
+  criadoPor: { utilizadorId: string }
+) {
   return withTenantTransaction(municipioId, async (tx) => {
-    return tx.comissaoModeradores.create({
+    const utilizador = await tx.utilizador.findUnique({ where: { id: dados.utilizadorId } });
+
+    if (!utilizador) {
+      throw new UtilizadorInvalidoParaComissaoError("Utilizador não encontrado.");
+    }
+
+    if (utilizador.tipoConta !== "COMISSAO_MORADORES") {
+      throw new UtilizadorInvalidoParaComissaoError(
+        "O utilizador seleccionado não tem o tipo de conta Comissão de Moradores."
+      );
+    }
+
+    const jaTemComissao = await tx.comissaoModeradores.findUnique({
+      where: { utilizadorId: dados.utilizadorId },
+    });
+    if (jaTemComissao) {
+      throw new UtilizadorJaTemComissaoError("Este utilizador já está associado a uma comissão.");
+    }
+
+    const comissaoCriada = await tx.comissaoModeradores.create({
       data: {
         municipioId,
+        utilizadorId: dados.utilizadorId,
         bairro: dados.bairro,
         presidenteNome: dados.presidenteNome,
-        estado: dados.estado,
+        criadoPorUtilizadorId: criadoPor.utilizadorId,
         ...(dados.coordenadasLat !== undefined && { coordenadasLat: dados.coordenadasLat }),
         ...(dados.coordenadasLng !== undefined && { coordenadasLng: dados.coordenadasLng }),
         ...(dados.presidenteContacto !== undefined && { presidenteContacto: dados.presidenteContacto }),
@@ -70,19 +129,36 @@ export async function criarComissao(municipioId: string, dados: ComissaoCreateIn
           },
         }),
       },
-      include: { membros: true },
+      include: { membros: true, utilizador: { select: UTILIZADOR_SELECT_SEGURO } },
     });
+
+    await tx.logAuditoria.create({
+      data: {
+        municipioId,
+        utilizadorId: criadoPor.utilizadorId,
+        accao: "COMISSAO_MODERADORES_CRIADA",
+        entidade: "ComissaoModeradores",
+        entidadeId: comissaoCriada.id,
+      },
+    });
+
+    return comissaoCriada;
   });
 }
 
-export async function atualizarComissao(id: string, municipioId: string, dados: ComissaoUpdateInput) {
+export async function atualizarComissao(
+  id: string,
+  municipioId: string,
+  dados: ComissaoUpdateInput,
+  alteradoPor: { utilizadorId: string }
+) {
   return withTenantTransaction(municipioId, async (tx) => {
-    await tx.comissaoModeradores.findUniqueOrThrow({ where: { id } });
+    const existente = await tx.comissaoModeradores.findUnique({ where: { id } });
+    if (!existente) throw new ComissaoNaoEncontradaError("Comissão não encontrada.");
 
     const payload: Prisma.ComissaoModeradoresUncheckedUpdateInput = {
       ...(dados.bairro !== undefined && { bairro: dados.bairro }),
       ...(dados.presidenteNome !== undefined && { presidenteNome: dados.presidenteNome }),
-      ...(dados.estado !== undefined && { estado: dados.estado }),
       ...(dados.coordenadasLat !== undefined && { coordenadasLat: dados.coordenadasLat }),
       ...(dados.coordenadasLng !== undefined && { coordenadasLng: dados.coordenadasLng }),
       ...(dados.presidenteContacto !== undefined && { presidenteContacto: dados.presidenteContacto }),
@@ -90,21 +166,94 @@ export async function atualizarComissao(id: string, municipioId: string, dados: 
       ...(dados.observacoes !== undefined && { observacoes: dados.observacoes }),
     };
 
-    return tx.comissaoModeradores.update({ where: { id }, data: payload, include: { membros: true } });
+    const atualizada = await tx.comissaoModeradores.update({
+      where: { id },
+      data: payload,
+      include: { membros: true, utilizador: { select: UTILIZADOR_SELECT_SEGURO } },
+    });
+
+    await tx.logAuditoria.create({
+      data: {
+        municipioId,
+        utilizadorId: alteradoPor.utilizadorId,
+        accao: "COMISSAO_MODERADORES_ACTUALIZADA",
+        entidade: "ComissaoModeradores",
+        entidadeId: id,
+      },
+    });
+
+    return atualizada;
   });
 }
 
-export async function removerComissao(id: string, municipioId: string) {
+export async function alterarEstadoComissao(
+  id: string,
+  municipioId: string,
+  dados: AlterarEstadoComissaoInput,
+  alteradoPor: { utilizadorId: string }
+) {
   return withTenantTransaction(municipioId, async (tx) => {
-    await tx.comissaoModeradores.findUniqueOrThrow({ where: { id } });
-    return tx.comissaoModeradores.delete({ where: { id } });
+    const existente = await tx.comissaoModeradores.findUnique({ where: { id } });
+    if (!existente) throw new ComissaoNaoEncontradaError("Comissão não encontrada.");
+
+    if (existente.estado === dados.estado) return existente;
+
+    const permitido = TRANSICOES_PERMITIDAS[existente.estado]?.includes(dados.estado);
+    if (!permitido) {
+      throw new TransicaoDeEstadoInvalidaError(
+        `Não é possível mudar de "${existente.estado}" para "${dados.estado}".`
+      );
+    }
+
+    const atualizada = await tx.comissaoModeradores.update({
+      where: { id },
+      data: { estado: dados.estado },
+      include: { membros: true, utilizador: { select: UTILIZADOR_SELECT_SEGURO } },
+    });
+
+    if (dados.estado === "INACTIVA") {
+      await tx.utilizador.update({ where: { id: existente.utilizadorId }, data: { estado: "SUSPENSA" } });
+      await revokeAllRefreshTokens(existente.utilizadorId);
+    }
+    if (dados.estado === "ACTIVA" && existente.estado === "INACTIVA") {
+      await tx.utilizador.update({ where: { id: existente.utilizadorId }, data: { estado: "ACTIVA" } });
+    }
+
+    await tx.logAuditoria.create({
+      data: {
+        municipioId,
+        utilizadorId: alteradoPor.utilizadorId,
+        accao: `COMISSAO_MODERADORES_ESTADO_${dados.estado}`,
+        entidade: "ComissaoModeradores",
+        entidadeId: id,
+        ...(dados.motivo !== undefined && { observacao: dados.motivo }),
+      },
+    });
+
+    return atualizada;
   });
 }
 
-export async function adicionarMembro(comissaoId: string, municipioId: string, dados: AdicionarMembroInput) {
+export async function removerComissao(id: string, municipioId: string, removidoPor: { utilizadorId: string }) {
+  return alterarEstadoComissao(
+    id,
+    municipioId,
+    { estado: "INACTIVA", motivo: "Comissão desactivada via remoção administrativa." },
+    removidoPor
+  );
+}
+
+export async function adicionarMembro(
+  comissaoId: string,
+  municipioId: string,
+  dados: AdicionarMembroInput,
+  adicionadoPor: { utilizadorId: string }
+) {
   return withTenantTransaction(municipioId, async (tx) => {
-    await tx.comissaoModeradores.findUniqueOrThrow({ where: { id: comissaoId } });
-    return tx.membroComissao.create({
+    const comissao = await tx.comissaoModeradores.findUnique({ where: { id: comissaoId } });
+    if (!comissao) throw new ComissaoNaoEncontradaError("Comissão não encontrada.");
+
+    const membro = await tx.membroComissao.create({
       data: {
         comissaoId,
         nome: dados.nome,
@@ -112,15 +261,44 @@ export async function adicionarMembro(comissaoId: string, municipioId: string, d
         ...(dados.contacto !== undefined && { contacto: dados.contacto }),
       },
     });
+
+    await tx.logAuditoria.create({
+      data: {
+        municipioId,
+        utilizadorId: adicionadoPor.utilizadorId,
+        accao: "MEMBRO_COMISSAO_ADICIONADO",
+        entidade: "MembroComissao",
+        entidadeId: membro.id,
+      },
+    });
+
+    return membro;
   });
 }
 
-export async function removerMembro(comissaoId: string, membroId: string, municipioId: string) {
+export async function removerMembro(
+  comissaoId: string,
+  membroId: string,
+  municipioId: string,
+  removidoPor: { utilizadorId: string }
+) {
   return withTenantTransaction(municipioId, async (tx) => {
-    const membro = await tx.membroComissao.findUniqueOrThrow({ where: { id: membroId } });
+    const membro = await tx.membroComissao.findUnique({ where: { id: membroId } });
+    if (!membro) throw new ComissaoNaoEncontradaError("Membro não encontrado.");
     if (membro.comissaoId !== comissaoId) {
-      throw new Error("Membro não pertence a esta comissão.");
+      throw new MembroNaoPertenceAComissaoError("Membro não pertence a esta comissão.");
     }
-    return tx.membroComissao.delete({ where: { id: membroId } });
+
+    await tx.membroComissao.delete({ where: { id: membroId } });
+
+    await tx.logAuditoria.create({
+      data: {
+        municipioId,
+        utilizadorId: removidoPor.utilizadorId,
+        accao: "MEMBRO_COMISSAO_REMOVIDO",
+        entidade: "MembroComissao",
+        entidadeId: membroId,
+      },
+    });
   });
 }

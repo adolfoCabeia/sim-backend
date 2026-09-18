@@ -8,6 +8,8 @@ import {
   contaInternaCriadaEmailTemplate,
   processoConcluidoEmailTemplate,
   processoAtualizadoEmailTemplate,
+  comissaoCredenciaisEmailTemplate,
+  sessaoTerminadaPorNovoLoginEmailTemplate,
 } from "./email.templates.js";
 
 export async function sendConfirmationEmail(params: {
@@ -45,6 +47,7 @@ export async function sendContaBloqueadaEmail(params: {
 
   await dispatchEmail({ to: params.to, toName: params.toName, subject, html });
 }
+
 export async function sendPasswordResetEmail(params: {
   to: string;
   toName: string;
@@ -137,6 +140,51 @@ export async function sendProcessoAtualizadoEmail(params: {
     titulo: params.titulo,
     mensagem: params.mensagem,
     observacao: params.observacao,
+  });
+
+  await dispatchEmail({ to: params.to, toName: params.toName, subject, html });
+}
+
+/**
+ * NOVO: envia as credenciais de acesso à Comissão de Moradores, criada por
+ * um funcionário municipal. Precisamos do municipioNome, por isso quem
+ * chama esta função (auth.service.ts) já resolve isso antes de invocar.
+ */
+export async function sendComissaoCredenciaisEmail(params: {
+  to: string;
+  toName: string;
+  municipioNome: string;
+  password: string;
+  loginUrl: string;
+}): Promise<void> {
+  const { subject, html } = comissaoCredenciaisEmailTemplate({
+    nomeCompleto: params.toName,
+    municipioNome: params.municipioNome,
+    email: params.to,
+    password: params.password,
+    loginUrl: params.loginUrl,
+  });
+
+  await dispatchEmail({ to: params.to, toName: params.toName, subject, html });
+}
+
+/**
+ * NOVO: alerta enviado quando uma sessão de INTERNO é terminada à força
+ * por um novo login (forcarNovaSessao: true), para que o titular da conta
+ * detecte rapidamente uso indevido de credenciais.
+ */
+export async function sendSessaoTerminadaPorNovoLoginEmail(params: {
+  to: string;
+  toName: string;
+  municipioNome: string;
+  dataHora: Date;
+  ipNovoLogin?: string;
+}): Promise<void> {
+  const { subject, html } = sessaoTerminadaPorNovoLoginEmailTemplate({
+    nomeCompleto: params.toName,
+    municipioNome: params.municipioNome,
+    dataHora: params.dataHora,
+    ...(params.ipNovoLogin !== undefined && { ipNovoLogin: params.ipNovoLogin }),
   });
 
   await dispatchEmail({ to: params.to, toName: params.toName, subject, html });

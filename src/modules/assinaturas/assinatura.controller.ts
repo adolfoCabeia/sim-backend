@@ -21,22 +21,36 @@ export async function listarController(
   reply: FastifyReply
 ) {
   const query = listarAssinaturasQuerySchema.parse(req.query);
-  const assinaturas = await service.listarAssinaturas({
+  const emissoes = await service.listarAssinaturas({
     municipioId: req.user.municipioId,
     referenciaTipo: query.referenciaTipo,
     referenciaId: query.referenciaId,
   });
-  return reply.send(assinaturas);
+  return reply.send(emissoes);
 }
 
-export async function verificarController(
-  req: FastifyRequest<{ Params: { id: string }; Body: { conteudo: string } }>,
+export async function verificarPublicoController(
+  req: FastifyRequest<{ Params: { codigo: string } }>,
   reply: FastifyReply
 ) {
-  const resultado = await service.verificarAssinatura({
-    assinaturaId: req.params.id,
-    municipioId: req.user.municipioId,
-    conteudo: req.body.conteudo,
-  });
+  const resultado = await service.verificarDocumentoPublicoPorCodigo(req.params.codigo);
   return reply.send(resultado);
+}
+
+
+export async function gerarPdfController(
+  req: FastifyRequest<{ Params: { tipo: string; id: string } }>,
+  reply: FastifyReply
+) {
+  const pdfBuffer = await service.gerarPdfDocumento({
+    municipioId: req.user.municipioId,
+    referenciaTipo: req.params.tipo,
+    referenciaId: req.params.id,
+    nomeMunicipio: req.user.municipioId, // ajusta conforme o que o teu JWT/sessão realmente expõe
+  });
+
+  return reply
+    .header("Content-Type", "application/pdf")
+    .header("Content-Disposition", `inline; filename="documento-${req.params.id}.pdf"`)
+    .send(pdfBuffer);
 }

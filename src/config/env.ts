@@ -14,18 +14,9 @@ const envSchema = z.object({
   ALERTAS_OPERACIONAIS_CRON: z.string().optional(), // ex: "0 * * * *" = de hora a hora
   ALERTAS_OPERACIONAIS_CRON_ACTIVO: z.coerce.boolean().default(true),
 
-/*   MINIO_ENDPOINT: z.string().min(1),
-  MINIO_PORT: z.coerce.number().default(9000),
-  MINIO_ACCESS_KEY: z.string().min(1),
-  MINIO_SECRET_KEY: z.string().min(1),
-  MINIO_USE_SSL: z
-    .string()
-    .default("false")
-    .transform((v) => v === "true"),
-  MINIO_BUCKET_DOCUMENTOS: z.string().default("simviana-documentos"), */
-DATABASE_POOL_MAX: z.coerce.number().default(15),
-DATABASE_BYPASS_POOL_MAX: z.coerce.number().default(5),
-DATABASE_SSL: z.coerce.boolean().optional(), // sem isto definido, SSL liga-se automaticamente fora de "development"
+  DATABASE_POOL_MAX: z.coerce.number().default(15),
+  DATABASE_BYPASS_POOL_MAX: z.coerce.number().default(5),
+  DATABASE_SSL: z.coerce.boolean().optional(), // sem isto definido, SSL liga-se automaticamente fora de "development"
   AWS_REGION: z.string().min(1, "AWS_REGION é obrigatório"),
   AWS_ACCESS_KEY_ID: z.string().min(1, "AWS_ACCESS_KEY_ID é obrigatório"),
   AWS_SECRET_ACCESS_KEY: z.string().min(1, "AWS_SECRET_ACCESS_KEY é obrigatório"),
@@ -34,6 +25,8 @@ DATABASE_SSL: z.coerce.boolean().optional(), // sem isto definido, SSL liga-se a
   JWT_SECRET: z.string().min(32, "JWT_SECRET deve ter pelo menos 32 caracteres"),
   JWT_ACCESS_EXPIRES_IN: z.string().default("15m"),
   JWT_REFRESH_EXPIRES_IN: z.string().default("7d"),
+  BREVO_API_KEY: z.string(),
+  ASSINATURA_MASTER_KEY: z.string(),
 
   ASSINATURA_ELETRONICA_SECRET: z
     .string()

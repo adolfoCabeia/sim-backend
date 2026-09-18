@@ -862,6 +862,12 @@ model Utilizador {
   mfaSecret                         String?
   deveTrocarPassword                Boolean                     @default(false)
   tentativasLoginFalhadas           Int                         @default(0)
+  online         Boolean   @default(false)
+  ultimoLoginEm  DateTime?
+  ultimoLogoutEm DateTime?
+  ultimoIpLogin  String?
+  comissaoModeradores ComissaoModeradores? @relation("ComissaoUtilizador")
+  comissoesCriadas    ComissaoModeradores[] @relation("ComissaoCriadaPor")
   bloqueadoAte                      DateTime?
   ativo                             Boolean                     @default(true)
   criadoEm                          DateTime                    @default(now())
@@ -1017,53 +1023,60 @@ model LogAuditoria {
   @@map("logs_auditoria")
 }
 
-/**
- * Assinatura electrónica (secções 5.4 e 20 do documento técnico) —
- * "Assinatura electrónica obrigatória para: pareceres jurídicos finais,
- * despachos do Administrador, contratos, autos de fiscalização... com
- * validade jurídica e trilha de verificação".
- * ANTES DESTA ALTERAÇÃO: não existia nenhuma forma de assinar nada —
- * documentos eram só anexados como ficheiro (`storageKey`), sem hash de
- * integridade nem qualquer noção de assinatura.
- * Não é uma assinatura digital PKI (X.509/certificado qualificado) — não
- * há infra-estrutura de certificação para isso neste projecto. É um
- * mecanismo prático de não-repúdio: hash SHA-256 do conteúdo assinado +
- * HMAC (com um segredo do servidor) sobre {hash, signatário, timestamp},
- * para que qualquer alteração posterior ao conteúdo OU ao próprio registo
- * de assinatura seja detectável. `referenciaTipo`/`referenciaId` é uma
- * referência polimórfica (não há uma tabela única "Documento assinável" —
- * pode apontar para um ProcessoGenerico, um Documento, etc.).
- */
-model AssinaturaEletronica {
-  id             String   @id @default(uuid())
-  municipioId    String
-  signatarioId   String
-  referenciaTipo String // "PROCESSO_GENERICO" | "DOCUMENTO" | "FISCALIZACAO_DETALHE" | ...
-  referenciaId   String
-  tipoAssinatura String // "PARECER_JURIDICO" | "DESPACHO" | "CONTRATO" | "AUTO_FISCALIZACAO"
-  hashConteudo   String // SHA-256 (hex) do conteúdo assinado, em texto canónico
-  assinaturaHmac String // HMAC-SHA256 (hex) de {hashConteudo, signatarioId, criadoEm}
-  ipOrigem       String?
-  criadoEm       DateTime @default(now())
+model ChaveAssinaturaUtilizador {
+  id                  String    @id @default(uuid())
+  utilizadorId        String
+  chavePublica        String    // SPKI DER, base64
+  chavePrivadaCifrada String    // AES-256-GCM ciphertext, base64
+  iv                  String
+  authTag             String
+  criadoEm            DateTime  @default(now())
+  revogadoEm          DateTime? // null = chave activa
 
-  @@index([municipioId, referenciaTipo, referenciaId])
-  @@index([municipioId, signatarioId])
-  @@map("assinaturas_eletronicas")
+  @@index([utilizadorId, revogadoEm])
+  @@index([utilizadorId, criadoEm])
 }
 
-/**
- * Arquivo Digital (secção 8.1 do documento técnico) — substitui o arquivo
- * físico em papel por pastas digitais organizadas livremente pelo
- * utilizador ("inserir o nome da pasta onde vai estar guardado o
- * documento"). `pastaPaiId` permite sub-pastas (hierarquia arbitrária);
- * `direcaoId` é opcional — quando definido, restringe a pasta a uma
- * direcção/secção específica (ex.: pasta "Contratos 2026" só visível à
- * Secretaria Geral); quando null, a pasta é do município.
- * A Biblioteca Jurídica Digital (secção 10.1) e o GEPE (secção 11) não
- * têm modelo de dados próprio — reaproveitam este mesmo sistema de
- * pastas/documentos, distinguidos por convenção de nome de pasta (ex.:
- * "Biblioteca Jurídica / Legislação Municipal").
- */
+model EmissaoDocumento {
+  id                String                  @id @default(uuid())
+  municipioId       String
+  referenciaTipo    String
+  referenciaId      String
+  versao            Int
+  conteudoSnapshot  String?                 // null em registos migrados do sistema legado (HMAC)
+  hashConteudo      String
+  codigoVerificacao String                  @unique
+  origemLegado      Boolean                 @default(false)
+  criadoEm          DateTime                @default(now())
+  substituidaPorId  String?                 @unique
+  substituidaPor    EmissaoDocumento?       @relation("Substituicao", fields: [substituidaPorId], references: [id])
+  substitui         EmissaoDocumento?       @relation("Substituicao")
+  assinaturas       AssinaturaEletronica[]
+
+  @@unique([referenciaTipo, referenciaId, versao])
+  @@index([municipioId])
+}
+
+enum AlgoritmoAssinatura {
+  ED25519
+  HMAC_LEGADO
+}
+
+model AssinaturaEletronica {
+  id                String               @id @default(uuid())
+  municipioId       String
+  emissaoId         String
+  emissao           EmissaoDocumento     @relation(fields: [emissaoId], references: [id])
+  signatarioId      String
+  tipoAssinatura    String
+  algoritmo         AlgoritmoAssinatura  @default(ED25519)
+  assinaturaDigital String?              // Ed25519, base64 — null para registos legado
+  assinaturaHmac    String?              // HMAC-SHA256, hex — só para registos legado
+  ipOrigem          String?
+  criadoEm          DateTime             @default(now())
+
+  @@index([emissaoId])
+}
 model Pasta {
   id          String   @id @default(uuid())
   municipioId String
@@ -1682,8 +1695,11 @@ model OcorrenciaAnexo {
 }
 
 model ComissaoModeradores {
-  id                   String                    @id @default(uuid())
-  municipioId          String
+  id          String @id @default(uuid())
+  municipioId String
+  utilizadorId String     @unique
+  utilizador   Utilizador @relation("ComissaoUtilizador", fields: [utilizadorId], references: [id], onDelete: Cascade)
+
   bairro               String
   coordenadasLat       Float?
   coordenadasLng       Float?
@@ -1692,8 +1708,13 @@ model ComissaoModeradores {
   documentacaoLegalUrl String?
   estado               EstadoComissaoModeradores @default(EM_REGULARIZACAO)
   observacoes          String?
-  criadoEm             DateTime                  @default(now())
-  alteradoEm           DateTime                  @updatedAt
+
+  // NOVO: auditoria — que funcionário criou esta comissão
+  criadoPorUtilizadorId String?
+  criadoPorUtilizador   Utilizador? @relation("ComissaoCriadaPor", fields: [criadoPorUtilizadorId], references: [id])
+
+  criadoEm   DateTime @default(now())
+  alteradoEm DateTime @updatedAt
 
   membros     MembroComissao[]
   ocorrencias Ocorrencia[]
@@ -1713,7 +1734,7 @@ model MembroComissao {
   id         String   @id @default(uuid())
   comissaoId String
   nome       String
-  cargo      String // ex.: Presidente, Vice-Presidente, Secretário, Vogal
+  cargo      String
   contacto   String?
   criadoEm   DateTime @default(now())
 

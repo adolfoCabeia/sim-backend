@@ -4,11 +4,13 @@ import * as docs from "./comissao.docs.js";
 import {
   comissaoCreateSchema,
   comissaoUpdateSchema,
+  alterarEstadoComissaoSchema,
   adicionarMembroSchema,
 } from "./comissao.schema.js";
 import type {
   ComissaoCreateInput,
   ComissaoUpdateInput,
+  AlterarEstadoComissaoInput,
   ListarComissoesQuery,
   AdicionarMembroInput,
 } from "./comissao.schema.js";
@@ -34,19 +36,6 @@ export async function comissoesModeradoresRoutes(fastify: FastifyInstance) {
     controller.obterController
   );
 
-  fastify.post<{ Body: ComissaoCreateInput }>(
-    "/comissoes-moradores",
-    {
-      ...docs.criarComissaoDocs,
-      preHandler: [
-        fastify.authenticate,
-        requirePermission("comissoes-moradores:gerir"),
-        validateBody(comissaoCreateSchema),
-      ],
-    },
-    controller.criarController
-  );
-
   fastify.patch<{ Params: { id: string }; Body: ComissaoUpdateInput }>(
     "/comissoes-moradores/:id",
     {
@@ -60,6 +49,21 @@ export async function comissoesModeradoresRoutes(fastify: FastifyInstance) {
     controller.atualizarController
   );
 
+  // NOVO: transição de estado isolada da actualização de dados operacionais.
+  fastify.patch<{ Params: { id: string }; Body: AlterarEstadoComissaoInput }>(
+    "/comissoes-moradores/:id/estado",
+    {
+      ...docs.alterarEstadoComissaoDocs,
+      preHandler: [
+        fastify.authenticate,
+        requirePermission("comissoes-moradores:gerir"),
+        validateBody(alterarEstadoComissaoSchema),
+      ],
+    },
+    controller.alterarEstadoController
+  );
+
+  // Agora é uma desactivação (soft-delete) internamente — ver comissao.service.ts.
   fastify.delete<{ Params: { id: string } }>(
     "/comissoes-moradores/:id",
     {

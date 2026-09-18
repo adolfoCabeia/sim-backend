@@ -50,7 +50,7 @@ export const registerDocs = {
     description:
       "Cria uma nova conta no município indicado. Contas CIDADAO, EMPRESA e INSTITUICAO " +
       "recebem um email de confirmação (via Brevo) antes de poderem iniciar sessão. " +
-      "Contas INTERNO e COMISSAO_MORADORES não usam confirmação por email — ficam " +
+      "Contas INTERNO e COMISSAO_MORADORES não usam confirmação por email, ficam " +
       "PENDENTE_VALIDACAO até um administrador validar a identidade (secção 5.3 do documento). " +
       "Quando 'documentoNumero' é indicado (ex.: número do BI), fica gravado na conta e passa a " +
       "poder ser usado como 'identificador' no login, em alternativa ao email.",

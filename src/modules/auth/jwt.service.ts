@@ -106,19 +106,6 @@ export class RefreshTokenReutilizadoError extends Error {
   }
 }
 
-/**
- * ATENÇÃO:
- *
- * Para encontrar o município antes de possuir contexto de tenant,
- * precisamos consultar refresh_tokens.
- *
- * Como refresh_tokens possui RLS, essa leitura só funcionará
- * se a política de SELECT permitir o bootstrap do token.
- *
- * Portanto, esta função depende da política de bootstrap
- * apresentada mais abaixo.
- */
-
 async function encontrarRefreshTokenPorHash(
   tokenHash: string
 ) {
@@ -154,13 +141,6 @@ export async function rotateRefreshToken(
 ): Promise<RotateResult> {
   const tokenHash = hashToken(rawToken);
 
-  /**
-   * Bootstrap:
-   *
-   * Ainda não conhecemos o município.
-   * A policy refresh_token_bootstrap_select permite
-   * localizar somente o token correspondente ao hash.
-   */
   const existing = await encontrarRefreshTokenPorHash(tokenHash);
 
   if (!existing) {
@@ -169,10 +149,6 @@ export async function rotateRefreshToken(
     );
   }
 
-  /**
-   * A tabela utilizadores não possui RLS.
-   * Portanto conseguimos descobrir o município.
-   */
   const municipioId = await obterMunicipioDoUtilizador(
     existing.utilizadorId
   );
@@ -183,16 +159,9 @@ export async function rotateRefreshToken(
     );
   }
 
-  /**
-   * A partir daqui entramos no contexto normal
-   * de tenant.
-   */
   return withTenantTransaction(
     municipioId,
     async (tx) => {
-      /**
-       * Reconsulta dentro do tenant correto.
-       */
       const token = await tx.refreshToken.findUnique({
         where: {
           id: existing.id,
@@ -211,11 +180,6 @@ export async function rotateRefreshToken(
         );
       }
 
-      /**
-       * Token já utilizado.
-       *
-       * Revoga todas as sessões restantes do utilizador.
-       */
       if (token.revogadoEm) {
         await tx.refreshToken.updateMany({
           where: {
@@ -227,23 +191,25 @@ export async function rotateRefreshToken(
           },
         });
 
+        // Reutilização de refresh token é um forte indício de roubo de
+        // sessão: além de revogar tudo, marcamos o utilizador como
+        // offline, já que nenhuma sessão dele deve continuar válida.
+        await tx.utilizador.update({
+          where: { id: token.utilizadorId },
+          data: { online: false, ultimoLogoutEm: new Date() },
+        });
+
         throw new RefreshTokenReutilizadoError(
           "Refresh token já tinha sido usado — todas as sessões foram revogadas por segurança."
         );
       }
 
-      /**
-       * Token expirado.
-       */
       if (token.expiraEm < new Date()) {
         throw new RefreshTokenInvalidoError(
           "Refresh token expirado."
         );
       }
 
-      /**
-       * Revoga o token atual.
-       */
       await tx.refreshToken.update({
         where: {
           id: token.id,
@@ -253,16 +219,10 @@ export async function rotateRefreshToken(
         },
       });
 
-      /**
-       * Cria novo refresh token.
-       */
       const novoRawToken = randomBytes(40).toString("hex");
-
       const novoTokenHash = hashToken(novoRawToken);
-
       const novaExpiracao = new Date(
-        Date.now() +
-          parseExpiryToMs(env.JWT_REFRESH_EXPIRES_IN)
+        Date.now() + parseExpiryToMs(env.JWT_REFRESH_EXPIRES_IN)
       );
 
       await tx.refreshToken.create({
@@ -270,11 +230,9 @@ export async function rotateRefreshToken(
           utilizadorId: token.utilizadorId,
           tokenHash: novoTokenHash,
           expiraEm: novaExpiracao,
-
           ...(params.ipOrigem !== undefined && {
             ipOrigem: params.ipOrigem,
           }),
-
           ...(params.userAgent !== undefined && {
             userAgent: params.userAgent,
           }),
@@ -294,7 +252,11 @@ export async function rotateRefreshToken(
 }
 
 /**
- * Revoga um refresh token específico.
+ * Revoga um refresh token específico e marca o utilizador como offline.
+ *
+ * NOVO: antes só revogava o token; agora, dentro da mesma transacção de
+ * tenant, actualiza utilizador.online = false. É este o ponto único onde
+ * o logout — de qualquer tipo de conta — marca a presença como offline.
  */
 export async function revokeRefreshToken(
   rawToken: string
@@ -326,7 +288,7 @@ export async function revokeRefreshToken(
   await withTenantTransaction(
     municipioId,
     async (tx) => {
-      await tx.refreshToken.updateMany({
+      const resultado = await tx.refreshToken.updateMany({
         where: {
           id: token.id,
           revogadoEm: null,
@@ -335,6 +297,16 @@ export async function revokeRefreshToken(
           revogadoEm: new Date(),
         },
       });
+
+      // Só marca offline se este era de facto um token activo que acabámos
+      // de revogar agora — evita repor "offline" por engano em chamadas
+      // repetidas de logout com um token já revogado antes.
+      if (resultado.count > 0) {
+        await tx.utilizador.update({
+          where: { id: token.utilizadorId },
+          data: { online: false, ultimoLogoutEm: new Date() },
+        });
+      }
     },
     {
       timeout: 10_000,
@@ -367,6 +339,11 @@ export async function revokeAllRefreshTokens(
         data: {
           revogadoEm: new Date(),
         },
+      });
+
+      await tx.utilizador.update({
+        where: { id: utilizadorId },
+        data: { online: false, ultimoLogoutEm: new Date() },
       });
     },
     {

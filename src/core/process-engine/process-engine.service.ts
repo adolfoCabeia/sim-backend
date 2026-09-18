@@ -14,6 +14,7 @@ import {
   ESTADOS_DESPACHO_FINAL,
 } from "./process-engine.states.js";
 import { notificarCidadaoSubmissao, notificarCidadaoTransicao, notificarAtribuicao, notificarGam } from "./process-engine.notifications.js";
+import { dispararEnviosPendentes, type EnviosPendentes } from "../notifications/notification.service.js";
 import { hasPermission } from "../../modules/auth/rbac/rbac.service.js";
 import { obterServicoPorCodigoTx } from "../../modules/servicos/servico.service.js";
 import type { ServicoFormatado } from "../../modules/servicos/servico.service.js";
@@ -62,27 +63,38 @@ const LOCALIZACOES_ADMINISTRATIVAS_GLOBAIS: LocalizacaoProcesso[] = [
 
 /*
  * ── NOTA IMPORTANTE SOBRE NOTIFICAÇÕES ──────────────────────────────────
- * As funções `notificarX(tx, ...)` fazem I/O de rede (email/SMS/push).
- * NUNCA devem ser chamadas com o `tx` da transação de negócio principal:
- * se a rede demorar, a transação (que tem um timeout curto, tipicamente
- * 5-10s) expira e o commit falha com P2028, mesmo que as escritas na BD
- * já estivessem prontas há muito tempo.
+ * As funções `notificarX(tx, ...)` (em process-engine.notifications.js)
+ * só fazem leituras/escritas de BD dentro da `tx` que recebem — a escrita
+ * do registo "APP" e o emit do socket. Elas NÃO enviam email/SMS: devolvem
+ * um objecto `EnviosPendentes` (ou uma lista) com o que falta enviar.
  *
  * Padrão adotado em todo este ficheiro:
- *   1. `withTenantTransaction` só faz leituras/escritas de negócio e
- *      devolve dados simples (não devolve `tx`, nem faz await de rede).
- *   2. Depois do commit, disparamos a notificação numa transação curta
- *      e independente, através de `dispararNotificacao`.
- *   3. Falhas de notificação são apanhadas e logadas — nunca revertem
- *      nem falham a ação de negócio já concluída.
+ *   1. `withTenantTransaction` só faz leituras/escritas de negócio e a
+ *      escrita "APP" da notificação, devolvendo os `EnviosPendentes`
+ *      (nunca faz await de rede, nem devolve `tx`).
+ *   2. Depois do commit, os `EnviosPendentes` são passados a
+ *      `dispararEnviosPendentes`, que faz o envio real de email/SMS já
+ *      fora de qualquer transacção da BD.
+ *   3. Tudo isto acontece dentro de `dispararNotificacaoComEnvio`, que
+ *      também apanha e loga qualquer falha — nunca reverte nem falha a
+ *      ação de negócio já concluída.
+ *
+ * Porquê: enviar email/SMS dentro de uma transacção interactive do Prisma
+ * é perigoso — se a rede demorar mais que o timeout da tx (tipicamente
+ * 5-10s), o commit falha com P2028 ("Transaction not found"), mesmo que
+ * as escritas na BD já estivessem prontas há muito tempo. Isolar o envio
+ * de rede fora de qualquer tx elimina esse risco por completo.
  */
-async function dispararNotificacao(
+async function dispararNotificacaoComEnvio(
   municipioId: string,
   contexto: string,
-  fn: (tx: Prisma.TransactionClient) => Promise<void>
+  fn: (tx: Prisma.TransactionClient) => Promise<EnviosPendentes | EnviosPendentes[] | void>
 ): Promise<void> {
   try {
-    await withTenantTransaction(municipioId, fn);
+    const resultado = await withTenantTransaction(municipioId, fn);
+    if (!resultado) return;
+    const lista = Array.isArray(resultado) ? resultado : [resultado];
+    await dispararEnviosPendentes(contexto, ...lista);
   } catch (err) {
     // eslint-disable-next-line no-console
     console.error(`[notificacao] Falha ao notificar (${contexto}):`, err);
@@ -384,8 +396,8 @@ export async function criarProcesso(params: {
     }
   );
   if (requerenteParaNotificar) {
-    await dispararNotificacao(params.municipioId, `criarProcesso:cidadao:${processo.id}`, async (tx) => {
-      await notificarCidadaoSubmissao(tx, {
+    await dispararNotificacaoComEnvio(params.municipioId, `criarProcesso:cidadao:${processo.id}`, async (tx) => {
+      return notificarCidadaoSubmissao(tx, {
         requerenteId: requerenteParaNotificar.id,
         email: requerenteParaNotificar.email,
         nomeCompleto: requerenteParaNotificar.nomeCompleto,
@@ -397,8 +409,8 @@ export async function criarProcesso(params: {
     });
   }
 
-  await dispararNotificacao(params.municipioId, `criarProcesso:gam:${processo.id}`, async (tx) => {
-    await notificarGam(tx, {
+  await dispararNotificacaoComEnvio(params.municipioId, `criarProcesso:gam:${processo.id}`, async (tx) => {
+    return notificarGam(tx, {
       municipioId: params.municipioId,
       titulo: `Novo processo ${processo.numero}`,
       mensagem: temPagamento
@@ -758,8 +770,8 @@ export async function transicionar(params: {
 
   // ── Notificação do cidadão: fora da transação de escrita ──
   if (notificacaoCidadao) {
-    await dispararNotificacao(params.municipioId, `transicionar:cidadao:${params.processoId}`, async (tx) => {
-      await notificarCidadaoTransicao(tx, {
+    await dispararNotificacaoComEnvio(params.municipioId, `transicionar:cidadao:${params.processoId}`, async (tx) => {
+      return notificarCidadaoTransicao(tx, {
         requerenteId: notificacaoCidadao.requerenteId,
         email: notificacaoCidadao.email,
         nomeCompleto: notificacaoCidadao.nomeCompleto,
@@ -850,10 +862,8 @@ export async function atribuirResponsavel(params: {
       };
     }
   );
-
-  // ── Notificação do novo responsável: fora da transação de escrita ──
-  await dispararNotificacao(params.municipioId, `atribuirResponsavel:${params.processoId}`, async (tx) => {
-    await notificarAtribuicao(tx, {
+  await dispararNotificacaoComEnvio(params.municipioId, `atribuirResponsavel:${params.processoId}`, async (tx) => {
+    return notificarAtribuicao(tx, {
       funcionarioId: funcionario.id,
       email: funcionario.email,
       nomeCompleto: funcionario.nomeCompleto,

@@ -7,6 +7,7 @@ import {
   confirmMfaSetup,
   requestPasswordReset,
   resetPassword,
+  createComissaoModeradores,
   CredenciaisInvalidasError,
   ContaBloqueadaError,
   ContaNaoActivaError,
@@ -19,7 +20,9 @@ import {
   TokenRedefinicaoInvalidoError,
   DirecaoNaoEncontradaError,
   RegistoInternoNaoPermitidoError,
-  ForaDoHorarioDeAcessoError
+  RegistoComissaoNaoPermitidoError,
+  ForaDoHorarioDeAcessoError,
+  SessaoActivaExistenteError,
 } from "./auth.service.js";
 import {
   rotateRefreshToken,
@@ -36,6 +39,7 @@ import type {
   ActivateMfaInput,
   ForgotPasswordInput,
   ResetPasswordInput,
+  CreateComissaoModeradoresInput,
 } from "./auth.schema.js";
 import { env } from "../../config/env.js";
 import { isRateLimited } from "../../utils/rate-limit-key.js";
@@ -91,8 +95,50 @@ export async function registerController(
     if (error instanceof RegistoInternoNaoPermitidoError) {
       return reply.status(403).send({ success: false, message: error.message });
     }
+    if (error instanceof RegistoComissaoNaoPermitidoError) {
+      return reply.status(403).send({ success: false, message: error.message });
+    }
     request.log.error({ error }, "Erro inesperado no registo de utilizador");
     return reply.status(500).send({ success: false, message: "Erro interno ao criar conta." });
+  }
+}
+
+/**
+ * NOVO: criação de conta de Comissão de Moradores por um funcionário
+ * autenticado. Cria um Utilizador (tipoConta COMISSAO_MORADORES) e a
+ * linha operacional em ComissaoModeradores apontando para ele.
+ */
+export async function createComissaoModeradoresController(
+  request: FastifyRequest<{ Body: CreateComissaoModeradoresInput }>,
+  reply: FastifyReply
+) {
+  try {
+    const { comissao, utilizador } = await createComissaoModeradores(
+      request.body,
+      {
+        utilizadorId: request.user.sub,
+        municipioId: request.user.municipioId,
+      }
+    );
+
+    return reply.status(201).send({
+      success: true,
+      data: {
+        comissaoId: comissao.id,
+        utilizadorId: utilizador.id,
+        email: utilizador.email,
+        bairro: comissao.bairro,
+        estado: comissao.estado,
+      },
+    });
+  } catch (error) {
+    if (error instanceof EmailJaExisteError) {
+      return reply.status(409).send({ success: false, message: error.message });
+    }
+    request.log.error({ error }, "Erro inesperado ao criar comissão de moradores");
+    return reply
+      .status(500)
+      .send({ success: false, message: "Erro interno ao criar comissão de moradores." });
   }
 }
 
@@ -158,11 +204,16 @@ export async function loginController(
       },
     });
 
+    // Clientes mobile não têm cookie jar persistente da mesma forma que um
+    // browser, por isso recebem o refreshToken também no corpo.
+    const isMobileClient = request.headers["x-client-type"] === "mobile";
+
     return reply.send({
       success: true,
       data: {
         utilizador,
         accessToken,
+        ...(isMobileClient && { refreshToken }),
       },
     });
   } catch (error) {
@@ -197,6 +248,14 @@ export async function loginController(
       return reply
         .status(401)
         .send({ success: false, message: error.message, code: "MFA_INVALIDO" });
+    }
+    // NOVO: já existe uma sessão activa (INTERNO) — o cliente deve
+    // reenviar o login com forcarNovaSessao: true para confirmar que quer
+    // terminar a sessão anterior.
+    if (error instanceof SessaoActivaExistenteError) {
+      return reply
+        .status(409)
+        .send({ success: false, message: error.message, code: "SESSAO_ACTIVA_EXISTENTE" });
     }
     request.log.error({ err: error }, "Erro inesperado no login");
     return reply
@@ -293,6 +352,7 @@ export async function logoutController(
     const refreshToken = request.cookies.refreshToken || request.body.refreshToken;
 
     if (refreshToken) {
+      // marca o utilizador como offline internamente (ver jwt.service.ts)
       await revokeRefreshToken(refreshToken);
     }
     reply.clearCookie("refreshToken");
@@ -381,9 +441,6 @@ export async function confirmMfaController(
 
 const FORGOT_PASSWORD_MENSAGEM_GENERICA =
   "Se existir uma conta elegível com este email, foi enviado um link de recuperação de password.";
-// Tempo mínimo de resposta, para que o tempo do pedido não deixe perceber
-// se a conta existe/é elegível (canal lateral de temporização) — ver nota
-// em requestPasswordReset (auth.service.ts).
 const FORGOT_PASSWORD_TEMPO_MINIMO_MS = 400;
 const FORGOT_PASSWORD_MAX_POR_EMAIL = 3;
 const FORGOT_PASSWORD_JANELA_MS = 15 * 60 * 1000;
@@ -396,17 +453,11 @@ export async function forgotPasswordController(
   const email = request.body.email.trim().toLowerCase();
 
   try {
-    // Rate limit adicional por email (o rate limit da rota já limita por IP;
-    // isto evita que alguém a rodar de IP consiga martelar o mesmo email).
     if (!isRateLimited(`forgot-password:${email}`, FORGOT_PASSWORD_MAX_POR_EMAIL, FORGOT_PASSWORD_JANELA_MS)) {
       await requestPasswordReset(email);
     }
-    // O resultado (conta existe? é elegível? já está limitada?) nunca é
-    // exposto ao cliente — resposta sempre igual, em forma e em estado
-    // HTTP, para não permitir enumeração de contas/tipos de conta.
   } catch (error) {
     request.log.error({ error }, "Erro ao processar pedido de recuperação de password");
-    // Mesmo em erro interno, não diferenciamos a resposta.
   }
 
   const decorrido = Date.now() - inicio;

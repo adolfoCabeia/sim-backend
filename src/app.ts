@@ -42,22 +42,12 @@ import { direcoesRoutes } from "./modules/direcoes/direcoes.routes.js";
 import { conteudoPublicoRoutes } from "./modules/conteudo-publico/conteudo-publico.route.js";
 import { contactosInstitucionaisRoutes } from "./modules/contactos/contacto.route.js";
 import { logisticaRoutes } from "./modules/logistica/logistica.routes.js";
-// ACHADO DE AUDITORIA: stockRoutes existia (itens, movimentos, alertas de
-// reposição — secção 8.3.3 da especificação) mas nunca era registado em
-// nenhum lado da app. Toda a API REST de Stock/Economato estava
-// inacessível (404 em todos os endpoints), apesar do código, serviço e
-// testes de carga já assumirem que existia. Confirmado com teste de
-// carga real: GET /stock/alertas e POST /stock/movimentos devolviam 404
-// a 100% dos pedidos antes desta correcção.
 import { stockRoutes } from "./modules/stock/stock.routes.js";
 import { patrimonioRoutes } from "./modules/patrimonios/patrimonio.routes.js";
 import { rbacRoutes } from "./modules/auth/rbac/rbac.route.js";
 import { servicosContinuosRoutes } from "./modules/servicos-continuos/servicos-continuos.routes.js";
 import { manutencaoRoutes } from "./modules/manuntencao/manutencao.routes.js";
 import { servicosRoutes } from "./modules/servicos/servico.route.js";
-// ACHADO DE AUDITORIA: mesmo padrão — dashboard de pagamentos por
-// serviço (resumo, comparação, evolução, ranking, por direcção) escrito
-// por completo, nunca registado.
 import { servicosDashboardRoutes } from "./modules/servicos/servico.dashboard.route.js";
 import { funcionariosRoutes } from "./modules/rh/funcionarios/funcionario.route.js";
 import { feriasRoutes } from "./modules/rh/ferias/ferias.route.js";

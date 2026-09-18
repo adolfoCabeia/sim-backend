@@ -10,15 +10,6 @@ import {
 import { DIRECOES_TEMPLATE, DEPARTAMENTOS_POR_DIRECAO } from "../src/config/organograma.js";
 import { CATALOGO_SERVICOS_MUNICIPAIS } from "../src/config/catalogo-servicos.js";
 
-// ACHADO DE AUDITORIA: `ssl` estava sempre activo (necessário para o
-// Render em produção), o que quebra a ligação a um Postgres local sem
-// SSL (docker-compose de desenvolvimento) — "P1011: The server does
-// not support SSL connections". Este script usa `process.env`
-// directamente (não passa por src/config/env.ts), por isso a mesma
-// correcção aplicada em src/config/prisma.ts tem de ser repetida aqui
-// separadamente — são dois `Pool` completamente independentes.
-// Por omissão, SSL só liga quando NODE_ENV=production; pode ser forçado
-// com DATABASE_SSL=true/false em qualquer ambiente.
 const sslActivo = process.env.DATABASE_SSL !== undefined
   ? process.env.DATABASE_SSL === "true"
   : process.env.NODE_ENV === "production";
@@ -33,18 +24,18 @@ const pool = new Pool({
 });
 
 pool.on("connect", () => {
-  console.log("🟢 PostgreSQL: conexão estabelecida");
+  console.log("PostgreSQL: conexão estabelecida");
 });
 pool.on("acquire", () => {
-  console.log("🔵 PostgreSQL: conexão adquirida");
+  console.log("PostgreSQL: conexão adquirida");
 });
 
 pool.on("remove", () => {
-  console.log("🟡 PostgreSQL: conexão removida do pool");
+  console.log("PostgreSQL: conexão removida do pool");
 });
 
 pool.on("error", (err) => {
-  console.error("🔴 PostgreSQL Pool:", err);
+  console.error("PostgreSQL Pool:", err);
 });
 
 const adapter = new PrismaPg(pool);
@@ -65,7 +56,7 @@ async function withMunicipio<T>(municipioId: string, fn: (tx: any) => Promise<T>
     } catch (err: any) {
       const transitorio = /Connection terminated|ECONNRESET|ETIMEDOUT/.test(String(err?.message));
       if (!transitorio || i === tentativas) throw err;
-      console.warn(`   ⚠️  Ligação caiu (tentativa ${i}/${tentativas}), a repetir...`);
+      console.warn(` Ligação caiu (tentativa ${i}/${tentativas}), a repetir...`);
       await new Promise((r) => setTimeout(r, 1000 * i));
     }
   }

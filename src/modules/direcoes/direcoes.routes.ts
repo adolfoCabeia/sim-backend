@@ -39,8 +39,7 @@ export async function direcoesRoutes(fastify: FastifyInstance) {
     { ...listarDirecoesDocs, preHandler: [fastify.authenticate, requireAnyPermission("direcoes:consultar")] },
     listarDirecoesController
   );
-
-  // Rota fixa ANTES de "/direcoes/:id" — evita que "estatisticas" seja interpretado como um :id
+  
   fastify.get(
     "/direcoes/estatisticas/utilizadores",
     {

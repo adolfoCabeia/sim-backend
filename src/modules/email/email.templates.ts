@@ -254,4 +254,80 @@ export function processoAtualizadoEmailTemplate(params: {
       params.municipioNome
     ),
   };
+
+  
+}
+
+export function comissaoCredenciaisEmailTemplate(params: {
+  nomeCompleto: string;
+  municipioNome: string;
+  email: string;
+  password: string;
+  loginUrl: string;
+}): EmailContent {
+  return {
+    subject: `SIM-${params.municipioNome} — Conta da Comissão de Moradores criada`,
+    html: baseLayout(
+      `
+      <p>Olá ${params.nomeCompleto},</p>
+      <p>
+        Foi criada uma conta de acesso para a Comissão de Moradores no
+        SIM-${params.municipioNome}, por um funcionário municipal. Seguem os dados de acesso:
+      </p>
+      <p style="font-size: 14px;">
+        Email: <strong>${params.email}</strong><br/>
+        Password: <span style="font-size: 18px; font-weight: bold; letter-spacing: 1px; background: #f2f2f2; padding: 4px 10px; border-radius: 4px; display: inline-block;">${params.password}</span>
+      </p>
+      <p>
+        Por segurança, ao iniciar sessão pela primeira vez vai ser-lhe pedido para escolher
+        uma password nova. Guarde esta password provisória em local seguro até lá.
+      </p>
+      <p>
+        <a href="${params.loginUrl}"
+           style="display: inline-block; padding: 10px 20px; background: #0b5fae; color: #fff; text-decoration: none; border-radius: 4px;">
+          Iniciar sessão
+        </a>
+      </p>
+      <p style="font-size: 13px; color: #666;">
+        Se não esperava esta conta, contacte imediatamente a Administração Municipal.
+      </p>
+    `,
+      params.municipioNome
+    ),
+  };
+}
+
+export function sessaoTerminadaPorNovoLoginEmailTemplate(params: {
+  nomeCompleto: string;
+  municipioNome: string;
+  dataHora: Date;
+  ipNovoLogin?: string;
+}): EmailContent {
+  const dataFormatada = params.dataHora.toLocaleString("pt-AO", {
+    dateStyle: "medium",
+    timeStyle: "short",
+  });
+
+  return {
+    subject: `SIM-${params.municipioNome} — Nova sessão iniciada na sua conta`,
+    html: baseLayout(
+      `
+      <p>Olá ${params.nomeCompleto},</p>
+      <p>
+        A sua sessão anterior no SIM-${params.municipioNome} foi terminada porque foi iniciado
+        um novo login na sua conta em ${dataFormatada}, a partir de outro dispositivo.
+      </p>
+      ${
+        params.ipNovoLogin
+          ? `<p style="font-size: 13px; color: #666;">Endereço de origem do novo login: ${params.ipNovoLogin}</p>`
+          : ""
+      }
+      <p style="font-size: 13px; color: #666;">
+        Se foi você, pode ignorar este email. Se não reconhece este acesso, altere a sua
+        password imediatamente e contacte a Administração Municipal.
+      </p>
+    `,
+      params.municipioNome
+    ),
+  };
 }

@@ -118,12 +118,7 @@ export async function historicoDoEstabelecimento(estabelecimentoNome: string, mu
   });
 }
 
-/**
- * PRINCÍPIO (secção 13): "Aplicação de coimas — Sujeita a despacho do
- * Administrador". Esta função só regista o valor/data — quem a chama
- * (rota) exige a permissão reservada ao Administrador; o fiscal nunca a
- * invoca directamente.
- */
+
 export async function registarCoima(processoId: string, municipioId: string, dados: RegistarCoimaInput) {
   return withTenantTransaction(municipioId, async (tx) => {
     const detalhe = await tx.fiscalizacaoDetalhe.findUnique({ where: { processoId } });
