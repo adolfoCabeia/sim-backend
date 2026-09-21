@@ -14,6 +14,10 @@ import type {
   RecargaInput,
 } from "./servicos-continuos.schema.js";
 
+function obterUtilizadorId(req: FastifyRequest): string | undefined {
+  return (req as any).user?.sub;
+}
+
 export async function listarController(req: FastifyRequest<{ Querystring: ListarServicosQuery }>, reply: FastifyReply) {
   const query = listarServicosQuerySchema.parse(req.query);
   const municipioId = query.municipioId ?? (req as any).user?.municipioId;
@@ -46,7 +50,10 @@ export async function criarController(req: FastifyRequest<{ Body: ServicoContinu
   const municipioId = dados.municipioId ?? (req as any).user?.municipioId;
   if (!municipioId) return reply.status(400).send({ error: "municipioId não identificado" });
 
-  const item = await service.criar(municipioId, dados);
+  const utilizadorId = obterUtilizadorId(req);
+  if (!utilizadorId) return reply.status(401).send({ error: "Utilizador não autenticado" });
+
+  const item = await service.criar(municipioId, dados, utilizadorId);
   return reply.status(201).send(item);
 }
 
@@ -56,7 +63,10 @@ export async function atualizarController(req: FastifyRequest<{ Params: { id: st
   const municipioId = (req as any).user?.municipioId;
   if (!municipioId) return reply.status(400).send({ error: "municipioId não identificado" });
 
-  const item = await service.atualizar(id, municipioId, dados);
+  const utilizadorId = obterUtilizadorId(req);
+  if (!utilizadorId) return reply.status(401).send({ error: "Utilizador não autenticado" });
+
+  const item = await service.atualizar(id, municipioId, dados, utilizadorId);
   return reply.send(item);
 }
 
@@ -65,7 +75,10 @@ export async function removerController(req: FastifyRequest<{ Params: { id: stri
   const municipioId = (req as any).user?.municipioId;
   if (!municipioId) return reply.status(400).send({ error: "municipioId não identificado" });
 
-  await service.remover(id, municipioId);
+  const utilizadorId = obterUtilizadorId(req);
+  if (!utilizadorId) return reply.status(401).send({ error: "Utilizador não autenticado" });
+
+  await service.remover(id, municipioId, utilizadorId);
   return reply.status(204).send();
 }
 
@@ -75,7 +88,10 @@ export async function recarregarController(req: FastifyRequest<{ Params: { id: s
   const municipioId = (req as any).user?.municipioId;
   if (!municipioId) return reply.status(400).send({ error: "municipioId não identificado" });
 
-  const item = await service.registrarRecarga(id, municipioId, dados);
+  const utilizadorId = obterUtilizadorId(req);
+  if (!utilizadorId) return reply.status(401).send({ error: "Utilizador não autenticado" });
+
+  const item = await service.registrarRecarga(id, municipioId, dados, utilizadorId);
   return reply.send(item);
 }
 

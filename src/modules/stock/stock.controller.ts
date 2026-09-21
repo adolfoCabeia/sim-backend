@@ -16,6 +16,10 @@ import type {
   ListarMovimentosQuery,
 } from "./stock.schema.js";
 
+function obterUtilizadorId(req: FastifyRequest): string | undefined {
+  return (req as any).user?.sub;
+}
+
 // ─── ItemStock ───
 
 export async function listarItensController(req: FastifyRequest<{ Querystring: ListarItensQuery }>, reply: FastifyReply) {
@@ -49,7 +53,10 @@ export async function criarItemController(req: FastifyRequest<{ Body: ItemStockC
   const municipioId = (req as any).user?.municipioId;
   if (!municipioId) return reply.status(400).send({ error: "municipioId não identificado" });
 
-  const item = await service.criarItemStock(municipioId, dados);
+  const utilizadorId = obterUtilizadorId(req);
+  if (!utilizadorId) return reply.status(401).send({ error: "Utilizador não autenticado" });
+
+  const item = await service.criarItemStock(municipioId, dados, utilizadorId);
   return reply.status(201).send(item);
 }
 
@@ -59,7 +66,10 @@ export async function atualizarItemController(req: FastifyRequest<{ Params: { id
   const municipioId = (req as any).user?.municipioId;
   if (!municipioId) return reply.status(400).send({ error: "municipioId não identificado" });
 
-  const item = await service.atualizarItemStock(id, municipioId, dados);
+  const utilizadorId = obterUtilizadorId(req);
+  if (!utilizadorId) return reply.status(401).send({ error: "Utilizador não autenticado" });
+
+  const item = await service.atualizarItemStock(id, municipioId, dados, utilizadorId);
   return reply.send(item);
 }
 
@@ -68,7 +78,10 @@ export async function removerItemController(req: FastifyRequest<{ Params: { id: 
   const municipioId = (req as any).user?.municipioId;
   if (!municipioId) return reply.status(400).send({ error: "municipioId não identificado" });
 
-  await service.removerItemStock(id, municipioId);
+  const utilizadorId = obterUtilizadorId(req);
+  if (!utilizadorId) return reply.status(401).send({ error: "Utilizador não autenticado" });
+
+  await service.removerItemStock(id, municipioId, utilizadorId);
   return reply.status(204).send();
 }
 
@@ -104,10 +117,11 @@ export async function listarMovimentosController(req: FastifyRequest<{ Querystri
 
 export async function criarMovimentoController(req: FastifyRequest<{ Body: MovimentoStockCreateInput }>, reply: FastifyReply) {
   const dados = movimentoStockCreateSchema.parse(req.body);
-  const utilizadorId = (req as any).user?.sub;
   const municipioId = (req as any).user?.municipioId;
-  if (!utilizadorId) return reply.status(401).send({ error: "Utilizador não autenticado" });
   if (!municipioId) return reply.status(400).send({ error: "municipioId não identificado" });
+
+  const utilizadorId = obterUtilizadorId(req);
+  if (!utilizadorId) return reply.status(401).send({ error: "Utilizador não autenticado" });
 
   const movimento = await service.criarMovimentoStock(municipioId, { ...dados, utilizadorId });
   return reply.status(201).send(movimento);
