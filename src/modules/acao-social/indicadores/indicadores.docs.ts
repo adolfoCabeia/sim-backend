@@ -4,7 +4,7 @@ export const obterIndicadoresDocs = {
     tags: ["Ação Social", "Indicadores"],
     summary: "Painel de indicadores agregados",
     description:
-      "Números para o relatório de impacto social — centros, beneficiários, pedidos de apoio, distribuição de " +
+      "Números para o relatório de impacto social, centros, beneficiários, pedidos de apoio, distribuição de " +
       "kits, programas. Casos sensíveis aparecem só como contagens por estado, nunca com descrição ou " +
       "identidade. Requer a permissão acao-social:indicadores:consultar.",
     security: [{ bearerAuth: [] }],

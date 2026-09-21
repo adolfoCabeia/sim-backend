@@ -79,10 +79,14 @@ const SELECT_PUBLICO = {
   documentoTipo: true,
   documentoNumero: true,
   documentoValidadoEm: true,
+  // NOVO: presença online/offline — em falta, por isso a listagem nunca
+  // mostrava o estado real de acesso dos utilizadores.
+  online: true,
+  ultimoLoginEm: true,
+  ultimoLogoutEm: true,
   criadoEm: true,
   alteradoEm: true,
 } satisfies Prisma.UtilizadorSelect;
-
 type UtilizadorPublico = Prisma.UtilizadorGetPayload<{ select: typeof SELECT_PUBLICO }>;
 
 export interface PaginatedResult<T> {

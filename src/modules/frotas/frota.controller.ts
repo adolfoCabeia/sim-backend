@@ -18,26 +18,73 @@ import type {
   RegistrarAbastecimentoInput,
 } from "./frota.schema.js";
 
-export async function listarController(req: FastifyRequest<{ Querystring: ListarFrotaQuery }>, reply: FastifyReply) {
+export async function listarController(
+  req: FastifyRequest<{ Querystring: ListarFrotaQuery }>,
+  reply: FastifyReply
+) {
   const query = listarFrotaQuerySchema.parse(req.query);
+
   const municipioId = query.municipioId ?? (req as any).user?.municipioId;
+
+  if (!municipioId) {
+    return reply.status(400).send({
+      success: false,
+      error: "Município não identificado",
+    });
+  }
+
+  const page = Number(query.page);
+  const limit = Number(query.limit);
 
   const result = await service.listar(
     {
-      ...(municipioId !== undefined && { municipioId }),
-      ...(query.alocacaoActual !== undefined && { alocacaoActual: query.alocacaoActual }),
-      ...(query.revisaoPendente !== undefined && { revisaoPendente: query.revisaoPendente === "true" }),
+      municipioId,
+      ...(query.alocacaoActual !== undefined && {
+        alocacaoActual: query.alocacaoActual,
+      }),
+      ...(query.revisaoPendente !== undefined && {
+        revisaoPendente: query.revisaoPendente === "true",
+      }),
     },
-    { page: Number(query.page), limit: Number(query.limit) }
+    {
+      page,
+      limit,
+    }
   );
-  return reply.send(result);
+
+  const totalPages = Math.ceil(result.total / limit);
+
+  return reply.send({
+    success: true,
+    data: {
+      items: result.data,
+      total: result.total,
+      page,
+      limit,
+      totalPages,
+    },
+  });
 }
 
-export async function obterController(req: FastifyRequest<{ Params: { id: string } }>, reply: FastifyReply) {
+export async function obterController(
+  req: FastifyRequest<{ Params: { id: string } }>,
+  reply: FastifyReply
+) {
   const { id } = frotaParamsSchema.parse(req.params);
+
   const item = await service.obter(id);
-  if (!item) return reply.status(404).send({ error: "Registro de frota não encontrado" });
-  return reply.send(item);
+
+  if (!item) {
+    return reply.status(404).send({
+      success: false,
+      error: "Registro de frota não encontrado",
+    });
+  }
+
+  return reply.send({
+    success: true,
+    data: item,
+  });
 }
 
 export async function criarController(req: FastifyRequest<{ Body: FrotaCreateInput }>, reply: FastifyReply) {

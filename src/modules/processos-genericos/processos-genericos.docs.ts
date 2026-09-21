@@ -352,16 +352,27 @@ export const listarAcoesDisponiveisDocs = {
           data: {
             type: "object",
             properties: {
-              acoes: { type: "array", items: acaoDisponivelObject },
+              acoes: {
+                type: "array", items: {
+                  type: "object", properties: {
+                    id: { type: "string" }, disponivel: { type: "boolean" }, motivo: { type: "string" },
+                    descricao: { type: "string" },
+                    destinosPossiveis: { type: "array", items: { type: "string", enum: ["SG", "GAM"] } },
+                  }
+                }
+              },
               processo: {
-                type: "object",
-                properties: {
-                  estado: { type: "string", enum: ESTADOS_PROCESSO_GENERICO },
-                  localizacaoActual: { type: "string" },
-                },
+                type: "object", properties: {
+                  estado: { type: "string" }, localizacaoActual: { type: "string" }, direcaoAtualId: { type: "string", nullable: true },
+                }
+              },
+              vez: {
+                type: "object", properties: {
+                  papel: { type: "string" }, eTuaVez: { type: "boolean" }, descricao: { type: "string" }, acaoEsperada: { type: "string" },
+                }
               },
             },
-          },
+          }
         },
       },
       404: errorResponse("Processo não encontrado"),

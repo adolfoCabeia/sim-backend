@@ -19,6 +19,10 @@ const utilizadorObject = {
     documentoTipo: { type: "string", nullable: true },
     documentoNumero: { type: "string", nullable: true },
     documentoValidadoEm: { type: "string", format: "date-time", nullable: true },
+    // NOVO
+    online: { type: "boolean", example: false },
+    ultimoLoginEm: { type: "string", format: "date-time", nullable: true },
+    ultimoLogoutEm: { type: "string", format: "date-time", nullable: true },
     criadoEm: { type: "string", format: "date-time" },
     alteradoEm: { type: "string", format: "date-time" },
   },

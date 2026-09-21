@@ -14,42 +14,42 @@ import { requirePermission } from "../../middleware/hasPermission.js";
 export async function gepeRoutes(fastify: FastifyInstance) {
   fastify.post<{ Body: CriarPlanoInput }>(
     "/gepe/planos",
-    { ...docs.criarPlanoDocs, preHandler: [fastify.authenticate, requirePermission("gepe:create"), validateBody(criarPlanoSchema)] },
+    { ...docs.criarPlanoDocs, preHandler: [fastify.authenticate, requirePermission("gepe:criar"), validateBody(criarPlanoSchema)] },
     controller.criarController
   );
 
   fastify.get<{ Querystring: ListarPlanosQuery }>(
     "/gepe/planos",
-    { ...docs.listarPlanosDocs, preHandler: [fastify.authenticate, requirePermission("gepe:read")] },
+    { ...docs.listarPlanosDocs, preHandler: [fastify.authenticate, requirePermission("gepe:consultar")] },
     controller.listarController
   );
 
   fastify.get<{ Params: { id: string } }>(
     "/gepe/planos/:id",
-    { ...docs.obterPlanoDocs, preHandler: [fastify.authenticate, requirePermission("gepe:read")] },
+    { ...docs.obterPlanoDocs, preHandler: [fastify.authenticate, requirePermission("gepe:consultar")] },
     controller.obterController
   );
 
   fastify.patch<{ Params: { id: string }; Body: AtualizarPlanoInput }>(
     "/gepe/planos/:id",
-    { ...docs.atualizarPlanoDocs, preHandler: [fastify.authenticate, requirePermission("gepe:create"), validateBody(atualizarPlanoSchema)] },
+    { ...docs.atualizarPlanoDocs, preHandler: [fastify.authenticate, requirePermission("gepe:criar"), validateBody(atualizarPlanoSchema)] },
     controller.atualizarController
   );
 
   fastify.delete<{ Params: { id: string } }>(
     "/gepe/planos/:id",
-    { ...docs.removerPlanoDocs, preHandler: [fastify.authenticate, requirePermission("gepe:create")] },
+    { ...docs.removerPlanoDocs, preHandler: [fastify.authenticate, requirePermission("gepe:criar")] },
     controller.removerController
   );
 
   fastify.post<{ Params: { id: string } }>(
     "/gepe/planos/:id/submeter",
-    { ...docs.submeterPlanoDocs, preHandler: [fastify.authenticate, requirePermission("gepe:create")] },
+    { ...docs.submeterPlanoDocs, preHandler: [fastify.authenticate, requirePermission("gepe:criar")] },
     controller.submeterController
   );
   fastify.post<{ Params: { id: string } }>(
     "/gepe/planos/:id/aprovar",
-    { ...docs.aprovarPlanoDocs, preHandler: [fastify.authenticate, requirePermission("gepe:aprove")] },
+    { ...docs.aprovarPlanoDocs, preHandler: [fastify.authenticate, requirePermission("gepe:aprovar")] },
     controller.aprovarController
   );
 
@@ -57,14 +57,14 @@ export async function gepeRoutes(fastify: FastifyInstance) {
     "/gepe/planos/:id/rejeitar",
     {
       ...docs.rejeitarPlanoDocs,
-      preHandler: [fastify.authenticate, requirePermission("gepe:aprove"), validateBody(rejeitarPlanoSchema)],
+      preHandler: [fastify.authenticate, requirePermission("gepe:aprovar"), validateBody(rejeitarPlanoSchema)],
     },
     controller.rejeitarController
   );
 
   fastify.get(
     "/gepe/investimentos-publicos",
-    { ...docs.investimentosPublicosDocs, preHandler: [fastify.authenticate, requirePermission("gepe:read")] },
+    { ...docs.investimentosPublicosDocs, preHandler: [fastify.authenticate, requirePermission("gepe:consultar")] },
     controller.investimentosPublicosController
   );
 }

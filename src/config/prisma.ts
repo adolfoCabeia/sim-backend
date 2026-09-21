@@ -118,16 +118,6 @@ export async function withTenantTransaction<T>(
         )
       `;
 
-      // ACHADO DE AUDITORIA: existia aqui uma segunda query
-      // (`contextoRls`, a reler current_setting logo a seguir a
-      // defini-lo) cujo resultado nunca era lido em lado nenhum —
-      // nem log, nem validação, nem devolvido. É uma ida-e-volta extra
-      // à base de dados, em TODAS as transacções da aplicação inteira,
-      // sem qualquer efeito. Removida. Se era usada para depuração
-      // manual, o mais barato é confirmar via `SELECT
-      // current_setting('app.current_municipio_id', true)` directamente
-      // no psql, não dentro do caminho quente de produção.
-
       return fn(tx);
     },
     {

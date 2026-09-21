@@ -8,7 +8,12 @@ export const frotaCreateSchema = z.object({
   dataUltimaRevisao: z.string().datetime().nullable().optional(),
   kmProximaRevisao: z.number().int().min(0).nullable().optional(),
   dataProximaRevisao: z.string().datetime().nullable().optional(),
-  consumoMedio: z.number().nonnegative().nullable().optional(),
+  consumoMedio: z
+  .number()
+  .min(0)
+  .max(100, "O consumo médio não pode ser superior a 100 km/l.")
+  .nullable()
+  .optional(),
   ultimoAbastecimento: z.string().datetime().nullable().optional(),
   tipoCombustivel: z.string().max(100).nullable().optional(),
 });

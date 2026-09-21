@@ -13,7 +13,12 @@ import {
   ESTADOS_FINAIS,
   ESTADOS_DESPACHO_FINAL,
 } from "./process-engine.states.js";
-import { notificarCidadaoSubmissao, notificarCidadaoTransicao, notificarAtribuicao, notificarGam } from "./process-engine.notifications.js";
+import {
+  notificarCidadaoSubmissao,
+  notificarCidadaoTransicao,
+  notificarAtribuicao,
+  notificarAcaoProcesso,
+} from "./process-engine.notifications.js";
 import { dispararEnviosPendentes, type EnviosPendentes } from "../notifications/notification.service.js";
 import { hasPermission } from "../../modules/auth/rbac/rbac.service.js";
 import { obterServicoPorCodigoTx } from "../../modules/servicos/servico.service.js";
@@ -21,6 +26,19 @@ import type { ServicoFormatado } from "../../modules/servicos/servico.service.js
 import { LocalizacaoProcesso } from "../../generated/prisma/client.js";
 import { circuitoTransicaoEhValida, LOCALIZACOES_DOC_SAIDA_AUTORIZADO } from "./process-engine.circuito.js";
 import { criarPagamentoParaProcessoTx } from "../../modules/pagamentos/pagamento.internal.js";
+import {
+  SIGLA_GABINETE_ADMINISTRADOR,
+  SIGLA_SECRETARIA_GERAL,
+  carregarContextoExecutor,
+  descreverVez,
+  determinarVez,
+  ehChefiaDaDireccao,
+  executorTemAVez,
+  mensagemDaVez,
+  podeSubirDirecto,
+  resolverDestinatariosDaVez,
+  type ProcessoParaVez,
+} from "./process-engine.vez.js";
 
 export class ProcessoGenericoNaoEncontradoError extends Error { }
 export class TransicaoGenericaInvalidaError extends Error { }
@@ -53,6 +71,7 @@ const AREA_DO_PERFIL_ADJUNTO: Record<string, AreaResponsabilidade> = {
 const PERFIS_COM_VISAO_GLOBAL = ["SUPER_ADMIN", "ADMINISTRADOR_MUNICIPAL"];
 
 const LOCALIZACOES_ADMINISTRATIVAS_GLOBAIS: LocalizacaoProcesso[] = [
+  LocalizacaoProcesso.EXPEDIENTE,
   LocalizacaoProcesso.GABINETE_ADMINISTRADOR,
   LocalizacaoProcesso.AGUARDA_DESPACHO_ROTEAMENTO,
   LocalizacaoProcesso.AGUARDA_DESPACHO_SAIDA,
@@ -84,8 +103,12 @@ const LOCALIZACOES_ADMINISTRATIVAS_GLOBAIS: LocalizacaoProcesso[] = [
  * 5-10s), o commit falha com P2028 ("Transaction not found"), mesmo que
  * as escritas na BD já estivessem prontas há muito tempo. Isolar o envio
  * de rede fora de qualquer tx elimina esse risco por completo.
+ *
+ * Quem avisa quem depois de cada movimento do circuito está em
+ * `notificarAposMovimento` (mais abaixo): quem tem a vez, os internos
+ * envolvidos e, nos marcos que lhe interessam, o cidadão.
  */
-async function dispararNotificacaoComEnvio(
+export async function dispararNotificacaoComEnvio(
   municipioId: string,
   contexto: string,
   fn: (tx: Prisma.TransactionClient) => Promise<EnviosPendentes | EnviosPendentes[] | void>
@@ -98,6 +121,22 @@ async function dispararNotificacaoComEnvio(
   } catch (err) {
     // eslint-disable-next-line no-console
     console.error(`[notificacao] Falha ao notificar (${contexto}):`, err);
+  }
+}
+
+/**
+ * As funções `notificarX(tx, ...)` podem devolver um único `EnviosPendentes`, uma lista deles
+ * (um por destinatário) ou nada. Este helper junta qualquer uma dessas formas à lista final.
+ */
+export function juntarEnvios(
+  destino: EnviosPendentes[],
+  envio: EnviosPendentes | EnviosPendentes[] | void | null | undefined
+): void {
+  if (!envio) return;
+  if (Array.isArray(envio)) {
+    destino.push(...envio);
+  } else {
+    destino.push(envio);
   }
 }
 
@@ -138,15 +177,21 @@ async function verificarSegmentacaoPorArea(
     );
   }
 }
-// Só permissões verdadeiramente administrativas dispensam a atribuição pessoal
-// nas DECISÕES sobre o processo (transicionar). tramitar_gabinete/ver_todos_gabinete
-// servem para o Administrador/GAM ver a fila toda, não para staff de direcção agir
-// sobre trabalho alheio.
-const PERMISSOES_QUE_DISPENSAM_ATRIBUICAO_PESSOAL = [
-  "processos_genericos:despachar_encaminhamento",
-  "processos_genericos:atribuir_responsavel",
-] as const;
 
+/**
+ * Enquanto o processo está atribuído a um funcionário, só ELE age sobre ele — nem a chefia da
+ * direcção nem a Administração. A chefia volta a ter a vez quando o funcionário sobe a resposta.
+ *
+ * Excepções (não é trabalho "do funcionário", é um acto de outro papel na sequência do circuito):
+ *  - processo sem responsável: a chefia/Administração age sem ficar com ele; qualquer outro
+ *    funcionário fica com o processo ao agir (reclamação);
+ *  - a vez é dele por outro papel (ex.: Administrador no despacho final, Gabinete, a chefia
+ *    quando o funcionário já subiu a resposta).
+ *
+ * Deve ser chamada apenas depois de `obterProcessoParaEscrita` (linha do processo
+ * bloqueada), para que `responsavelActualId` seja o valor real e dois funcionários
+ * não consigam "reclamar" o mesmo processo em simultâneo.
+ */
 async function verificarAtribuicaoPessoal(
   tx: Prisma.TransactionClient,
   executorId: string,
@@ -154,11 +199,22 @@ async function verificarAtribuicaoPessoal(
   processoId: string,
   responsavelActualId: string | null
 ): Promise<void> {
-  for (const permissao of PERMISSOES_QUE_DISPENSAM_ATRIBUICAO_PESSOAL) {
-    if (await hasPermission(executorId, municipioId, permissao)) return;
-  }
+  if (responsavelActualId === executorId) return;
+
+  const ctx = await carregarContextoExecutor(tx, municipioId, executorId);
+  const processo = await tx.processoGenerico.findUniqueOrThrow({
+    where: { id: processoId },
+    select: {
+      estado: true,
+      localizacaoActual: true,
+      responsavelActualId: true,
+      direcaoAtualId: true,
+      direcaoDespachadaId: true,
+    },
+  });
 
   if (responsavelActualId === null) {
+    if (ctx.ehAdministracao || ehChefiaDaDireccao(ctx, processo.direcaoAtualId)) return;
     await tx.processoGenerico.update({
       where: { id: processoId },
       data: { responsavelActualId: executorId },
@@ -166,13 +222,17 @@ async function verificarAtribuicaoPessoal(
     return;
   }
 
-  if (responsavelActualId !== executorId) {
-    throw new ProcessoNaoAtribuidoAoExecutorError(
-      "Este processo não te está atribuído, só podes consultá-lo. Pede a um responsável da tua direcção " +
-      "para to atribuir antes de agires sobre ele."
-    );
-  }
+  // Processo atribuído a outra pessoa: só passa quem tem a vez POR OUTRO PAPEL (Administrador,
+  // Gabinete, SG, ou a chefia quando o funcionário já subiu a resposta). Nunca por "sobrepor".
+  const vez = determinarVez(processo);
+  if (executorTemAVez(vez, ctx, processo)) return;
+
+  throw new ProcessoNaoAtribuidoAoExecutorError(
+    "Este processo está atribuído a outro colega, por isso só ele pode agir agora. " +
+    "Voltará à chefia quando ele subir a resposta."
+  );
 }
+
 const SELECT_PROCESSO_GENERICO = {
   id: true,
   numero: true,
@@ -214,22 +274,59 @@ const SELECT_PROCESSO_GENERICO_PUBLICO = {
   alteradoEm: true,
 } satisfies Prisma.ProcessoGenericoSelect;
 
-
+/**
+ * Gera o número do processo (NNN/ANO) por município + ano + tipo + direcção de origem.
+ * Números iguais podem existir entre tipos/direcções diferentes (não há unicidade por município).
+ *
+ * O advisory lock de transacção serializa a geração para a mesma combinação
+ * (município, ano, tipo, direcção): a segunda transacção só faz o `count` depois
+ * de a primeira ter feito commit, por isso não há números repetidos dentro do
+ * mesmo grupo. O lock é libertado automaticamente no commit/rollback.
+ */
 async function gerarNumeroProcessoGenerico(
   tx: Prisma.TransactionClient,
-  params: { municipioId: string; tipo: TipoProcessoGenerico; direcaoOrigemId: string | null }
+  params: {
+    municipioId: string;
+    tipo: TipoProcessoGenerico;
+    direcaoOrigemId: string | null;
+  }
 ): Promise<string> {
   const ano = new Date().getFullYear();
+
   const inicioAno = new Date(`${ano}-01-01T00:00:00.000Z`);
-  const inicioProximoAno = new Date(`${ano + 1}-01-01T00:00:00.000Z`);
+  const inicioProximoAno = new Date(
+    `${ano + 1}-01-01T00:00:00.000Z`
+  );
+
+  await tx.$executeRaw`
+    SELECT pg_advisory_xact_lock(
+      hashtext(
+        concat(
+          'processo-generico:',
+          ${params.municipioId}::text,
+          ':',
+          ${String(ano)}::text,
+          ':',
+          ${String(params.tipo)}::text,
+          ':',
+          coalesce(${params.direcaoOrigemId}::text, 'NULL')
+        )
+      )
+    )
+  `;
+
   const contagem = await tx.processoGenerico.count({
     where: {
       municipioId: params.municipioId,
       tipo: params.tipo,
       direcaoOrigemId: params.direcaoOrigemId,
-      criadoEm: { gte: inicioAno, lt: inicioProximoAno },
+      criadoEm: {
+        gte: inicioAno,
+        lt: inicioProximoAno,
+      },
     },
   });
+
   return `${String(contagem + 1).padStart(3, "0")}/${ano}`;
 }
 
@@ -239,6 +336,39 @@ async function obterProcessoGenericoOuFalhar(tx: Prisma.TransactionClient, proce
     throw new ProcessoGenericoNaoEncontradoError("Processo não encontrado.");
   }
   return processo;
+}
+
+/**
+ * Bloqueia a linha do processo até ao fim da transacção (lock de linha do Postgres,
+ * obtido através de um UPDATE). Qualquer outra transacção que tente escrever no mesmo
+ * processo fica à espera do commit/rollback desta, e depois lê o estado já actualizado.
+ *
+ * Usa o Prisma em vez de SQL cru para não depender do nome da tabela (@@map) nem do
+ * tipo do id.
+ */
+export async function bloquearProcessoGenerico(tx: Prisma.TransactionClient, processoId: string): Promise<void> {
+  try {
+    await tx.processoGenerico.update({
+      where: { id: processoId },
+      data: { alteradoEm: new Date() },
+      select: { id: true },
+    });
+  } catch (err) {
+    if ((err as { code?: string } | null)?.code === "P2025") {
+      throw new ProcessoGenericoNaoEncontradoError("Processo não encontrado.");
+    }
+    throw err;
+  }
+}
+
+/**
+ * Bloqueia a linha e só depois lê o processo. Usar em TODA a transacção que lê o
+ * processo, valida e depois escreve (read-modify-write). Como a leitura acontece
+ * depois do lock, vê sempre o estado mais recente.
+ */
+async function obterProcessoParaEscrita(tx: Prisma.TransactionClient, processoId: string) {
+  await bloquearProcessoGenerico(tx, processoId);
+  return obterProcessoGenericoOuFalhar(tx, processoId);
 }
 
 export async function documentosEmFalta(
@@ -297,16 +427,16 @@ export async function criarProcesso(params: {
         direcaoOrigemId = servico.direcaoResponsavel.id;
       }
 
-      const gam = await tx.direcao.findUnique({
-        where: { municipioId_sigla: { municipioId: params.municipioId, sigla: "GAM" } },
+      // Todo o processo novo entra pela Secretaria Geral, que o apresenta ao Administrador.
+      const sg = await tx.direcao.findUnique({
+        where: { municipioId_sigla: { municipioId: params.municipioId, sigla: SIGLA_SECRETARIA_GERAL } },
         select: { id: true },
       });
-      if (!gam) {
+      if (!sg) {
         throw new DirecaoNaoEncontradaError(
-          "O Gabinete do Administrador Municipal (GAM) não está configurado para este município, verifica se o seed foi corrido."
+          "A Secretaria Geral (SG) não está configurada para este município, verifica se o seed foi corrido."
         );
       }
-
       const numero = await gerarNumeroProcessoGenerico(tx, {
         municipioId: params.municipioId,
         tipo: params.tipo,
@@ -325,11 +455,12 @@ export async function criarProcesso(params: {
           origem: params.origem,
           assunto: params.assunto,
           estado: EstadoProcessoGenerico.RECEBIDO,
+          localizacaoActual: LocalizacaoProcesso.EXPEDIENTE,
           prazoLegalResposta,
           diasAlertaAntesPrazo,
           ...(params.requerenteUtilizadorId !== undefined && { requerenteUtilizadorId: params.requerenteUtilizadorId }),
           ...(direcaoOrigemId !== undefined && { direcaoOrigemId }),
-          direcaoAtualId: gam.id,
+          direcaoAtualId: sg.id,
           ...(params.responsavelActualId !== undefined && { responsavelActualId: params.responsavelActualId }),
           ...(params.servicoCodigo !== undefined && { servicoCodigo: params.servicoCodigo }),
         },
@@ -409,27 +540,55 @@ export async function criarProcesso(params: {
     });
   }
 
-  await dispararNotificacaoComEnvio(params.municipioId, `criarProcesso:gam:${processo.id}`, async (tx) => {
-    return notificarGam(tx, {
-      municipioId: params.municipioId,
-      titulo: `Novo processo ${processo.numero}`,
+  // Aviso à Secretaria Geral: é ela que apresenta o processo ao Administrador.
+  await dispararNotificacaoComEnvio(params.municipioId, `criarProcesso:sg:${processo.id}`, async (tx) => {
+    const destinatarios = await resolverDestinatariosDaVez(tx, params.municipioId, {
+      papel: "SECRETARIA_GERAL",
+      acaoEsperada: "",
+      direcaoId: null,
+      utilizadorId: null,
+    });
+    if (destinatarios.length === 0) return;
+
+    const soUm = destinatarios.length === 1;
+    return notificarAcaoProcesso(tx, {
+      titulo: temPagamento
+        ? `Novo processo ${processo.numero} — a aguardar pagamento`
+        : soUm
+          ? `Novo processo ${processo.numero} — a próxima acção é contigo`
+          : `Novo processo ${processo.numero} — a próxima acção é da tua equipa`,
       mensagem: temPagamento
-        ? `Um novo processo do tipo "${params.tipo}" foi submetido e aguarda confirmação de pagamento.`
-        : `Um novo processo do tipo "${params.tipo}" foi submetido pelo cidadão e aguarda apresentação ao Administrador.`,
-      tipo: "PROCESSO_SUBMETIDO",
+        ? `Foi submetido um pedido do tipo "${params.tipo}" que tem uma taxa associada. Só pode avançar depois de o pagamento ser confirmado.`
+        : `Foi submetido um novo pedido do tipo "${params.tipo}". O que falta fazer: apresentá-lo ao Administrador para despacho.`,
+      tipo: temPagamento ? "PROCESSO_ATUALIZADO" : "ACAO_REQUERIDA",
       processoId: processo.id,
       numeroProcesso: processo.numero,
+      destinatarios,
     });
   });
 
   return processo;
 }
 
+/**
+ * Pré-condição: o `processo` recebido deve ter sido obtido com `obterProcessoParaEscrita`
+ * (linha bloqueada), para que a validação do circuito não corra sobre dados desactualizados.
+ *
+ * `mensagemCidadao`: a observação interna (por exemplo a do Administrador) nunca aparece ao
+ * cidadão. Quando o movimento é um marco que lhe interessa, regista-se uma SEGUNDA transição,
+ * visível, com um texto escrito para ele.
+ */
 async function avancarLocalizacao(
   tx: Prisma.TransactionClient,
   processo: { id: string; localizacaoActual: LocalizacaoProcesso; numero: string },
   novaLocalizacao: LocalizacaoProcesso,
-  params: { executorId: string; observacao?: string; visivelAoCidadao?: boolean; dataExtra?: Prisma.ProcessoGenericoUncheckedUpdateInput }
+  params: {
+    executorId: string;
+    observacao?: string;
+    visivelAoCidadao?: boolean;
+    mensagemCidadao?: string;
+    dataExtra?: Prisma.ProcessoGenericoUncheckedUpdateInput;
+  }
 ) {
   if (!circuitoTransicaoEhValida(processo.localizacaoActual, novaLocalizacao)) {
     throw new CircuitoTransicaoInvalidaError(
@@ -454,19 +613,216 @@ async function avancarLocalizacao(
     },
   });
 
+  if (params.mensagemCidadao) {
+    await tx.processoGenericoTransicao.create({
+      data: {
+        processoId: processo.id,
+        estadoAnterior: actualizado.estado,
+        estadoNovo: actualizado.estado,
+        utilizadorId: params.executorId,
+        observacao: params.mensagemCidadao,
+        visivelAoCidadao: true,
+      },
+    });
+  }
+
   return actualizado;
 }
 
+/**
+ * Garante no backend a mesma regra que os botões mostram: só age quem tem a vez.
+ * Deve ser chamada depois de `obterProcessoParaEscrita`.
+ */
+async function exigirVez(
+  tx: Prisma.TransactionClient,
+  municipioId: string,
+  executorId: string,
+  processo: ProcessoParaVez
+) {
+  const ctx = await carregarContextoExecutor(tx, municipioId, executorId);
+  const vez = determinarVez(processo);
+  if (!executorTemAVez(vez, ctx, processo)) {
+    throw new ProcessoNaoAtribuidoAoExecutorError(
+      `Ainda não é a tua vez de agir neste processo. ${descreverVez(vez)}`
+    );
+  }
+  return ctx;
+}
+
+/**
+ * Avisa, depois do commit:
+ *  1. quem tem a vez → "a próxima acção é contigo";
+ *  2. os internos envolvidos (quem já mexeu no processo + responsável actual) → "o processo avançou";
+ *  3. o cidadão, quando `avisarCidadao` é passado (marcos que lhe interessam).
+ * Usar "{quem}" em `oQueAconteceu` para pôr o nome de quem fez a acção.
+ * Nunca falha a acção principal: corre dentro de `dispararNotificacaoComEnvio`.
+ */
+export async function notificarAposMovimento(params: {
+  municipioId: string;
+  processoId: string;
+  executorId: string;
+  oQueAconteceu: string;
+  incluirAdministrador?: boolean;
+  ignorarUtilizadorIds?: string[];
+  avisarCidadao?: { estado: string; mensagem: string };
+}): Promise<void> {
+  await dispararNotificacaoComEnvio(params.municipioId, `movimento:${params.processoId}`, async (tx) => {
+    const processo = await tx.processoGenerico.findUnique({
+      where: { id: params.processoId },
+      select: {
+        id: true,
+        numero: true,
+        estado: true,
+        localizacaoActual: true,
+        responsavelActualId: true,
+        direcaoAtualId: true,
+        direcaoDespachadaId: true,
+        requerenteUtilizadorId: true,
+      },
+    });
+    if (!processo) return;
+
+    const executor = await tx.utilizador.findUnique({
+      where: { id: params.executorId },
+      select: { nomeCompleto: true },
+    });
+    const oQueAconteceu = params.oQueAconteceu.split("{quem}").join(executor?.nomeCompleto ?? "Um colega");
+
+    const vez = determinarVez(processo);
+    const excluidos = new Set([params.executorId, ...(params.ignorarUtilizadorIds ?? [])]);
+    const envios: EnviosPendentes[] = [];
+
+    // 1) Quem tem a vez
+    const daVez = (await resolverDestinatariosDaVez(tx, params.municipioId, vez)).filter(
+      (d) => !excluidos.has(d.utilizadorId)
+    );
+    if (daVez.length > 0) {
+      let complemento: string | undefined;
+      if (processo.localizacaoActual === LocalizacaoProcesso.EXPEDIENTE_A_ENVIAR && processo.direcaoDespachadaId) {
+        const destino = await tx.direcao.findUnique({
+          where: { id: processo.direcaoDespachadaId },
+          select: { nome: true },
+        });
+        if (destino) complemento = `Direcção de destino: ${destino.nome}.`;
+      }
+      const { titulo, mensagem } = mensagemDaVez({
+        numero: processo.numero,
+        oQueAconteceu,
+        vez,
+        soUmDestinatario: daVez.length === 1,
+        ...(complemento && { complemento }),
+      });
+      const envio = await notificarAcaoProcesso(tx, {
+        titulo,
+        mensagem,
+        tipo: "ACAO_REQUERIDA",
+        processoId: processo.id,
+        numeroProcesso: processo.numero,
+        destinatarios: daVez,
+      });
+      juntarEnvios(envios, envio);
+    }
+
+    // 2) Internos envolvidos (quem já actuou + responsável actual [+ Administrador])
+    const jaAvisados = new Set(daVez.map((d) => d.utilizadorId));
+    const idsEnvolvidos = new Set<string>();
+    if (processo.responsavelActualId) idsEnvolvidos.add(processo.responsavelActualId);
+    const actores = await tx.processoGenericoTransicao.findMany({
+      where: { processoId: processo.id, utilizadorId: { not: null } },
+      distinct: ["utilizadorId"],
+      select: { utilizadorId: true },
+    });
+    for (const a of actores) if (a.utilizadorId) idsEnvolvidos.add(a.utilizadorId);
+
+    const filtros: Prisma.UtilizadorWhereInput[] = [{ id: { in: [...idsEnvolvidos] } }];
+    if (params.incluirAdministrador) {
+      filtros.push({ perfis: { some: { perfil: { nome: "ADMINISTRADOR_MUNICIPAL" } } } });
+    }
+    // tipoConta INTERNO deixa o requerente (cidadão) de fora desta lista
+    const envolvidos = (
+      await tx.utilizador.findMany({
+        where: { municipioId: params.municipioId, estado: "ACTIVA", tipoConta: "INTERNO", OR: filtros },
+        select: { id: true, email: true, nomeCompleto: true },
+      })
+    ).filter((u) => !excluidos.has(u.id) && !jaAvisados.has(u.id));
+
+    if (envolvidos.length > 0) {
+      const [direcaoActual, responsavel] = await Promise.all([
+        processo.direcaoAtualId
+          ? tx.direcao.findUnique({ where: { id: processo.direcaoAtualId }, select: { nome: true } })
+          : null,
+        processo.responsavelActualId
+          ? tx.utilizador.findUnique({ where: { id: processo.responsavelActualId }, select: { nomeCompleto: true } })
+          : null,
+      ]);
+      const envio = await notificarAcaoProcesso(tx, {
+        titulo: `Processo ${processo.numero} — novidade`,
+        mensagem:
+          `${oQueAconteceu} ` +
+          descreverVez(vez, { direcao: direcaoActual?.nome ?? null, responsavel: responsavel?.nomeCompleto ?? null }),
+        tipo: "PROCESSO_ATUALIZADO",
+        processoId: processo.id,
+        numeroProcesso: processo.numero,
+        destinatarios: envolvidos.map((u) => ({ utilizadorId: u.id, email: u.email, nomeCompleto: u.nomeCompleto })),
+      });
+      juntarEnvios(envios, envio);
+    }
+
+    // 3) Cidadão (só nos marcos que lhe interessam)
+    if (params.avisarCidadao && processo.requerenteUtilizadorId) {
+      const r = await tx.utilizador.findUnique({
+        where: { id: processo.requerenteUtilizadorId },
+        select: { id: true, email: true, nomeCompleto: true, telefone: true },
+      });
+      if (r) {
+        const envio = await notificarCidadaoTransicao(tx, {
+          requerenteId: r.id,
+          email: r.email,
+          nomeCompleto: r.nomeCompleto,
+          telefone: r.telefone,
+          numeroProcesso: processo.numero,
+          processoId: processo.id,
+          estadoNovo: params.avisarCidadao.estado,
+          observacao: params.avisarCidadao.mensagem,
+        });
+        juntarEnvios(envios, envio);
+      }
+    }
+
+    return envios;
+  });
+}
+
+/**
+ * A Secretaria Geral apresenta o processo ao Administrador para despacho.
+ */
 export async function apresentarAoAdministrador(params: {
   municipioId: string;
   processoId: string;
   executorId: string;
   observacao?: string;
 }) {
-  return withTenantTransaction(params.municipioId, async (tx) => {
-    const processo = await obterProcessoGenericoOuFalhar(tx, params.processoId);
-    return avancarLocalizacao(tx, processo, LocalizacaoProcesso.AGUARDA_DESPACHO_ROTEAMENTO, params);
+  const actualizado = await withTenantTransaction(params.municipioId, async (tx) => {
+    const processo = await obterProcessoParaEscrita(tx, params.processoId);
+    await exigirVez(tx, params.municipioId, params.executorId, processo);
+    if (processo.localizacaoActual === LocalizacaoProcesso.EXPEDIENTE && processo.estado !== EstadoProcessoGenerico.RECEBIDO) {
+      throw new CircuitoTransicaoInvalidaError(
+        "Este processo já trouxe uma resposta da direcção. Entregue-a ao Gabinete do Administrador em vez de a apresentar para novo despacho."
+      );
+    }
+    return avancarLocalizacao(tx, processo, LocalizacaoProcesso.AGUARDA_DESPACHO_ROTEAMENTO, {
+      ...params,
+      observacao: params.observacao ?? "Processo apresentado ao Administrador para despacho.",
+    });
   });
+
+  await notificarAposMovimento({
+    municipioId: params.municipioId,
+    processoId: params.processoId,
+    executorId: params.executorId,
+    oQueAconteceu: "{quem} (Secretaria Geral) apresentou o processo ao Administrador para despacho.",
+  });
+  return actualizado;
 }
 
 export async function despacharParaDireccao(params: {
@@ -484,23 +840,59 @@ export async function despacharParaDireccao(params: {
     );
   }
 
-  return withTenantTransaction(params.municipioId, async (tx) => {
-    const processo = await obterProcessoGenericoOuFalhar(tx, params.processoId);
+  const { actualizado, paraSG, nomeDireccao } = await withTenantTransaction(params.municipioId, async (tx) => {
+    const processo = await obterProcessoParaEscrita(tx, params.processoId);
 
     const direcao = await tx.direcao.findUnique({
       where: { municipioId_sigla: { municipioId: params.municipioId, sigla: params.direcaoDespachadaSigla } },
-      select: { id: true, nome: true },
+      select: { id: true, nome: true, sigla: true },
     });
     if (!direcao) {
       throw new DirecaoNaoEncontradaError(`A direcção "${params.direcaoDespachadaSigla}" não existe neste município.`);
     }
 
-    return avancarLocalizacao(tx, processo, LocalizacaoProcesso.EXPEDIENTE_A_ENVIAR, {
+    // Tudo o que o Administrador despacha passa pela SG. Se o destino É a SG,
+    // não há nada para expedir: o processo fica logo lá.
+    if (direcao.sigla === SIGLA_SECRETARIA_GERAL) {
+      const mudaDeDireccao = processo.direcaoAtualId !== direcao.id;
+      const actualizado = await avancarLocalizacao(tx, processo, LocalizacaoProcesso.DIRECCAO_COMPETENTE, {
+        ...params,
+        observacao:
+          params.observacao ??
+          `Despacho do Administrador: o processo ficou na ${direcao.nome}, que fica responsável por o tratar.`,
+        mensagemCidadao: `O seu pedido foi encaminhado para a ${direcao.nome}, que vai analisá-lo. Avisamos assim que houver novidades.`,
+        dataExtra: {
+          direcaoDespachadaId: direcao.id,
+          direcaoAtualId: direcao.id,
+          ...(mudaDeDireccao && { responsavelActualId: null }),
+        },
+      });
+      return { actualizado, paraSG: true, nomeDireccao: direcao.nome };
+    }
+
+    const actualizado = await avancarLocalizacao(tx, processo, LocalizacaoProcesso.EXPEDIENTE_A_ENVIAR, {
       ...params,
       observacao: params.observacao ?? `Despacho do Administrador: encaminhado para ${direcao.nome}.`,
       dataExtra: { direcaoDespachadaId: direcao.id },
     });
+    return { actualizado, paraSG: false, nomeDireccao: direcao.nome };
   });
+
+  await notificarAposMovimento({
+    municipioId: params.municipioId,
+    processoId: params.processoId,
+    executorId: params.executorId,
+    oQueAconteceu: paraSG
+      ? "O Administrador despachou o processo para a Secretaria Geral."
+      : `O Administrador despachou o processo para a ${nomeDireccao}; a Secretaria Geral vai enviá-lo.`,
+    ...(paraSG && {
+      avisarCidadao: {
+        estado: `Em tratamento na ${nomeDireccao}`,
+        mensagem: `O seu pedido foi encaminhado para a ${nomeDireccao}, que vai analisá-lo. Avisamos assim que houver novidades.`,
+      },
+    }),
+  });
+  return actualizado;
 }
 
 export async function despacharParaAssessorJuridico(params: {
@@ -517,8 +909,8 @@ export async function despacharParaAssessorJuridico(params: {
     );
   }
 
-  return withTenantTransaction(params.municipioId, async (tx) => {
-    const processo = await obterProcessoGenericoOuFalhar(tx, params.processoId);
+  const actualizado = await withTenantTransaction(params.municipioId, async (tx) => {
+    const processo = await obterProcessoParaEscrita(tx, params.processoId);
 
     const assessor = await tx.utilizador.findFirst({
       where: {
@@ -540,24 +932,59 @@ export async function despacharParaAssessorJuridico(params: {
       dataExtra: { responsavelActualId: assessor.id },
     });
   });
+
+  await notificarAposMovimento({
+    municipioId: params.municipioId,
+    processoId: params.processoId,
+    executorId: params.executorId,
+    oQueAconteceu: "O Administrador pediu o parecer jurídico sobre este processo.",
+  });
+  return actualizado;
 }
 
-
 export async function expedirParaDireccao(params: { municipioId: string; processoId: string; executorId: string; observacao?: string }) {
-  return withTenantTransaction(params.municipioId, async (tx) => {
-    const processo = await obterProcessoGenericoOuFalhar(tx, params.processoId);
+  const { actualizado, nomeDireccao } = await withTenantTransaction(params.municipioId, async (tx) => {
+    const processo = await obterProcessoParaEscrita(tx, params.processoId);
+    await exigirVez(tx, params.municipioId, params.executorId, processo);
     if (!processo.direcaoDespachadaId) {
       throw new ExpedicaoNaoAutorizadaError("Este processo ainda não tem uma direcção despachada pelo Administrador, não há o que expedir.");
     }
 
-    return avancarLocalizacao(tx, processo, LocalizacaoProcesso.DIRECCAO_COMPETENTE, {
+    const direcao = await tx.direcao.findUnique({ where: { id: processo.direcaoDespachadaId }, select: { nome: true } });
+    const nome = direcao?.nome ?? "direcção competente";
+    const mudaDeDireccao = processo.direcaoAtualId !== processo.direcaoDespachadaId;
+
+    const actualizado = await avancarLocalizacao(tx, processo, LocalizacaoProcesso.DIRECCAO_COMPETENTE, {
       ...params,
-      observacao: params.observacao ?? "Expedido formalmente pela Secretaria Geral/Secção de Expediente.",
-      dataExtra: { direcaoAtualId: processo.direcaoDespachadaId },
+      observacao: params.observacao ?? `Expedido pela Secretaria Geral para a ${nome}.`,
+      mensagemCidadao: `O seu pedido foi encaminhado para a ${nome}, que vai analisá-lo. Avisamos assim que houver novidades.`,
+      dataExtra: {
+        direcaoAtualId: processo.direcaoDespachadaId,
+        ...(mudaDeDireccao && { responsavelActualId: null }),
+      },
     });
+    return { actualizado, nomeDireccao: nome };
   });
+
+  await notificarAposMovimento({
+    municipioId: params.municipioId,
+    processoId: params.processoId,
+    executorId: params.executorId,
+    oQueAconteceu: `{quem} (Secretaria Geral) enviou o processo para a ${nomeDireccao}.`,
+    avisarCidadao: {
+      estado: `Em tratamento na ${nomeDireccao}`,
+      mensagem: `O seu pedido foi encaminhado para a ${nomeDireccao}, que vai analisá-lo. Avisamos assim que houver novidades.`,
+    },
+  });
+  return actualizado;
 }
 
+/**
+ * Subida da resposta.
+ *  - Director da direcção (ou Administração): sobe directo, sem passo de "receber resposta da
+ *    direcção". `viaExpediente` mantém-se no contrato: true = à SG, false = ao GAM.
+ *  - Funcionário: deixa a resposta pronta (RESPOSTA_A_SUBIR) e a chefia da direcção sobe-a.
+ */
 export async function subirResposta(params: {
   municipioId: string;
   processoId: string;
@@ -565,32 +992,78 @@ export async function subirResposta(params: {
   viaExpediente: boolean;
   observacao?: string;
 }) {
-  return withTenantTransaction(params.municipioId, async (tx) => {
-    const processo = await obterProcessoGenericoOuFalhar(tx, params.processoId);
-    const caminho = params.viaExpediente
-      ? "Resultado a subir via Secretaria Geral/Expediente."
-      : "Resultado a subir directamente ao Gabinete do Administrador.";
-    return avancarLocalizacao(tx, processo, LocalizacaoProcesso.RESPOSTA_A_SUBIR, {
-      ...params,
-      observacao: params.observacao ?? caminho,
-    });
+  const { actualizado, sobeDirecto, paraGabinete } = await withTenantTransaction(params.municipioId, async (tx) => {
+    const processo = await obterProcessoParaEscrita(tx, params.processoId);
+    const ctx = await exigirVez(tx, params.municipioId, params.executorId, processo);
+    // Regra: não se sobe a resposta (por nenhuma via) sem o documento com a resposta anexado.
+    await exigirAnexoSaida(tx, processo.id, "SUBIR_RESPOSTA");
+
+    if (!podeSubirDirecto(ctx, processo)) {
+      const actualizado = await avancarLocalizacao(tx, processo, LocalizacaoProcesso.RESPOSTA_A_SUBIR, {
+        ...params,
+        observacao: params.observacao ?? "Resposta preparada e enviada à chefia da direcção para ser subida.",
+      });
+      return { actualizado, sobeDirecto: false, paraGabinete: false };
+    }
+
+    const direcaoActual = processo.direcaoAtualId
+      ? await tx.direcao.findUnique({ where: { id: processo.direcaoAtualId }, select: { sigla: true } })
+      : null;
+    // Não faz sentido "subir à SG" estando o processo já na SG.
+    const jaEstaNaSG = direcaoActual?.sigla === SIGLA_SECRETARIA_GERAL;
+    const paraGabinete = !params.viaExpediente || jaEstaNaSG;
+
+    const actualizado = await avancarLocalizacao(
+      tx,
+      processo,
+      paraGabinete ? LocalizacaoProcesso.GABINETE_ADMINISTRADOR : LocalizacaoProcesso.EXPEDIENTE,
+      {
+        ...params,
+        observacao:
+          params.observacao ??
+          (paraGabinete
+            ? "Resposta subida directamente ao Gabinete do Administrador."
+            : "Resposta subida à Secretaria Geral, que a entrega ao Gabinete do Administrador."),
+      }
+    );
+    return { actualizado, sobeDirecto: true, paraGabinete };
   });
+
+  await notificarAposMovimento({
+    municipioId: params.municipioId,
+    processoId: params.processoId,
+    executorId: params.executorId,
+    oQueAconteceu: !sobeDirecto
+      ? "{quem} deixou a resposta pronta e enviou-a à chefia da direcção."
+      : paraGabinete
+        ? "{quem} subiu a resposta ao Gabinete do Administrador."
+        : "{quem} subiu a resposta à Secretaria Geral.",
+  });
+  return actualizado;
 }
 
 export async function prepararSaida(params: { municipioId: string; processoId: string; executorId: string; observacao?: string }) {
   return withTenantTransaction(params.municipioId, async (tx) => {
-    const processo = await obterProcessoGenericoOuFalhar(tx, params.processoId);
+    const processo = await obterProcessoParaEscrita(tx, params.processoId);
     await verificarAtribuicaoPessoal(tx, params.executorId, params.municipioId, processo.id, processo.responsavelActualId);
     return avancarLocalizacao(tx, processo, LocalizacaoProcesso.PREPARACAO_SAIDA, params);
   });
 }
 
 export async function submeterParaDespachoSaida(params: { municipioId: string; processoId: string; executorId: string; observacao?: string }) {
-  return withTenantTransaction(params.municipioId, async (tx) => {
-    const processo = await obterProcessoGenericoOuFalhar(tx, params.processoId);
+  const actualizado = await withTenantTransaction(params.municipioId, async (tx) => {
+    const processo = await obterProcessoParaEscrita(tx, params.processoId);
     await verificarAtribuicaoPessoal(tx, params.executorId, params.municipioId, processo.id, processo.responsavelActualId);
     return avancarLocalizacao(tx, processo, LocalizacaoProcesso.AGUARDA_DESPACHO_SAIDA, params);
   });
+
+  await notificarAposMovimento({
+    municipioId: params.municipioId,
+    processoId: params.processoId,
+    executorId: params.executorId,
+    oQueAconteceu: "{quem} preparou o documento de saída e submeteu-o ao Administrador.",
+  });
+  return actualizado;
 }
 
 
@@ -606,8 +1079,8 @@ export async function despacharSaida(params: {
     throw new DespachoRoteamentoNaoAutorizadoError("Só o Administrador Municipal (ou Adjunto/SUPER_ADMIN) pode despachar a saída de um processo.");
   }
 
-  return withTenantTransaction(params.municipioId, async (tx) => {
-    const processo = await obterProcessoGenericoOuFalhar(tx, params.processoId);
+  const actualizado = await withTenantTransaction(params.municipioId, async (tx) => {
+    const processo = await obterProcessoParaEscrita(tx, params.processoId);
 
     if (params.autorizar) {
       await exigirAnexoSaida(tx, processo.id);
@@ -619,18 +1092,38 @@ export async function despacharSaida(params: {
       observacao: params.observacao ?? (params.autorizar ? "Saída autorizada pelo Administrador." : "Saída recusada, devolvido à Direcção de origem."),
     });
   });
+
+  await notificarAposMovimento({
+    municipioId: params.municipioId,
+    processoId: params.processoId,
+    executorId: params.executorId,
+    oQueAconteceu: params.autorizar
+      ? "O Administrador autorizou a saída do documento."
+      : "O Administrador recusou a saída do documento e devolveu o processo à direcção.",
+  });
+  return actualizado;
 }
 
-async function exigirAnexoSaida(tx: Prisma.TransactionClient, processoId: string): Promise<void> {
+type ContextoAnexoSaida = "SUBIR_RESPOSTA" | "SAIDA";
+
+async function exigirAnexoSaida(
+  tx: Prisma.TransactionClient,
+  processoId: string,
+  contexto: ContextoAnexoSaida = "SAIDA"
+): Promise<void> {
   const anexoSaida = await tx.processoGenericoAnexo.findFirst({
     where: { processoId, tipoAnexo: "SAIDA" },
+    select: { id: true },
   });
-  if (!anexoSaida) {
-    throw new DocumentoSaidaObrigatorioError(
-      "Não há nenhum documento de saída (PDF) anexado a este processo. Anexe-o via " +
-      "no formulário (tipoAnexo=SAIDA) antes de autorizar/formalizar a saída."
-    );
-  }
+  if (anexoSaida) return;
+
+  throw new DocumentoSaidaObrigatorioError(
+    contexto === "SUBIR_RESPOSTA"
+      ? "Antes de subir a resposta, anexa o documento com a resposta ao pedido (tipo «Documento de saída»). " +
+        "O cidadão só o vê quando o processo estiver concluído."
+      : "Não há nenhum documento de saída (PDF) anexado a este processo. Anexe-o (tipo «Documento de saída») " +
+        "antes de autorizar/formalizar a saída."
+  );
 }
 
 export async function formalizarEnvioExterno(params: {
@@ -640,14 +1133,28 @@ export async function formalizarEnvioExterno(params: {
   destinoExterno: string;
   observacao?: string;
 }) {
-  return withTenantTransaction(params.municipioId, async (tx) => {
-    const processo = await obterProcessoGenericoOuFalhar(tx, params.processoId);
+  const actualizado = await withTenantTransaction(params.municipioId, async (tx) => {
+    const processo = await obterProcessoParaEscrita(tx, params.processoId);
+    await exigirVez(tx, params.municipioId, params.executorId, processo);
     await exigirAnexoSaida(tx, processo.id);
     return avancarLocalizacao(tx, processo, LocalizacaoProcesso.EXPEDIDO_EXTERNO, {
       ...params,
       observacao: params.observacao ?? `Envio formalizado para: ${params.destinoExterno}.`,
     });
   });
+
+  await notificarAposMovimento({
+    municipioId: params.municipioId,
+    processoId: params.processoId,
+    executorId: params.executorId,
+    oQueAconteceu: "{quem} (Secretaria Geral) formalizou o envio do documento.",
+    avisarCidadao: {
+      estado: "Resposta enviada",
+      mensagem:
+        "A resposta ao seu pedido foi emitida e enviada. Assim que estiver disponível, poderá consultá-la no acompanhamento do seu processo.",
+    },
+  });
+  return actualizado;
 }
 
 export async function transicionar(params: {
@@ -674,8 +1181,10 @@ export async function transicionar(params: {
     }
   }
 
-  const { actualizado, notificacaoCidadao } = await withTenantTransaction(params.municipioId, async (tx) => {
-    const processo = await obterProcessoGenericoOuFalhar(tx, params.processoId);
+  const { actualizado, notificacaoCidadao, estadoAnterior } = await withTenantTransaction(params.municipioId, async (tx) => {
+    // Lock de linha: duas transições simultâneas sobre o mesmo processo ficam
+    // serializadas, e a segunda valida contra o estado já actualizado pela primeira.
+    const processo = await obterProcessoParaEscrita(tx, params.processoId);
 
     if (processo.arquivoMortoEm) {
       throw new ProcessoJaArquivadoError("Processo em Arquivo Morto, não pode ser transicionado sem desarquivar primeiro.");
@@ -701,9 +1210,10 @@ export async function transicionar(params: {
         processo.localizacaoActual === LocalizacaoProcesso.PARECER_ASSESSOR_JURIDICO;
       if (!noCircuitoCorrecto) {
         throw new CircuitoTransicaoInvalidaError(
-          `Este processo ainda não percorreu o circuito administrativo (Gabinete do Administrador → despacho → ` +
-          `Secretaria Geral/Expediente → Direcção). Localização actual: ${processo.localizacaoActual}. ` +
-          `Use apresentarAoAdministrador → despacharParaDireccao → expedirParaDireccao antes de transicionar o estado.`
+          `Este processo ainda não percorreu o circuito administrativo (Secretaria Geral → Administrador → despacho → ` +
+          `Direcção). Localização actual: ${processo.localizacaoActual}. ` +
+          `Use apresentarAoAdministrador → despacharParaDireccao (→ expedirParaDireccao, se a direcção não for a SG) ` +
+          `antes de transicionar o estado.`
         );
       }
     }
@@ -765,7 +1275,7 @@ export async function transicionar(params: {
       }
     }
 
-    return { actualizado, notificacaoCidadao };
+    return { actualizado, notificacaoCidadao, estadoAnterior: processo.estado };
   });
 
   // ── Notificação do cidadão: fora da transação de escrita ──
@@ -784,10 +1294,22 @@ export async function transicionar(params: {
     });
   }
 
+  // ── Notificação interna: quem tem a vez + envolvidos (+ Administrador) ──
+  await notificarAposMovimento({
+    municipioId: params.municipioId,
+    processoId: params.processoId,
+    executorId: params.executorId,
+    oQueAconteceu:
+      `{quem} mudou o estado do processo de "${traduzirEstado(estadoAnterior)}" ` +
+      `para "${traduzirEstado(params.novoEstado)}".` +
+      (params.observacao ? ` Nota: ${params.observacao}` : ""),
+    incluirAdministrador: true,
+  });
+
   return actualizado;
 }
 
-function traduzirEstado(estado: EstadoProcessoGenerico): string {
+export function traduzirEstado(estado: EstadoProcessoGenerico): string {
   const nomes: Record<EstadoProcessoGenerico, string> = {
     RECEBIDO: "Recebido",
     EM_ANALISE: "Em Análise",
@@ -810,7 +1332,7 @@ export async function atribuirResponsavel(params: {
   const { actualizado, funcionario, atribuidoPorNome, numeroProcesso } = await withTenantTransaction(
     params.municipioId,
     async (tx) => {
-      const processo = await obterProcessoGenericoOuFalhar(tx, params.processoId);
+      const processo = await obterProcessoParaEscrita(tx, params.processoId);
 
       if (processo.arquivoMortoEm) {
         throw new ProcessoJaArquivadoError("Processo em Arquivo Morto, não pode ser reatribuído sem desarquivar primeiro.");
@@ -871,6 +1393,15 @@ export async function atribuirResponsavel(params: {
       processoId: params.processoId,
       atribuidoPorNome,
     });
+  });
+
+  // O funcionário escolhido já foi avisado acima; os restantes envolvidos ficam a saber.
+  await notificarAposMovimento({
+    municipioId: params.municipioId,
+    processoId: params.processoId,
+    executorId: params.executorId,
+    ignorarUtilizadorIds: [funcionario.id],
+    oQueAconteceu: `{quem} atribuiu o processo a ${funcionario.nomeCompleto}.`,
   });
 
   return actualizado;
@@ -991,7 +1522,7 @@ export async function obterProcessoInterno(params: { municipioId: string; proces
       where: { id: params.processoId },
       select: {
         ...SELECT_PROCESSO_GENERICO,
-       requerente: { select: { nomeCompleto: true } }, 
+        requerente: { select: { nomeCompleto: true } },
         direcaoAtual: { select: { id: true, nome: true, sigla: true } },
         direcaoDespachada: { select: { id: true, nome: true, sigla: true } },
         responsavelActual: { select: { id: true, nomeCompleto: true, email: true } },
@@ -1028,6 +1559,10 @@ export async function obterProcessoInterno(params: { municipioId: string; proces
 }
 
 const LOCALIZACOES_VALIDAS_PARA_ANEXO_SAIDA: LocalizacaoProcesso[] = [
+  // Durante o tratamento: o responsável anexa o documento com a resposta antes de a subir.
+  LocalizacaoProcesso.DIRECCAO_COMPETENTE,
+  LocalizacaoProcesso.PARECER_ASSESSOR_JURIDICO,
+  // Fase de saída
   LocalizacaoProcesso.PREPARACAO_SAIDA,
   LocalizacaoProcesso.AGUARDA_DESPACHO_SAIDA,
   LocalizacaoProcesso.EXPEDIENTE_SAIDA_A_FORMALIZAR,
@@ -1045,7 +1580,9 @@ export async function adicionarAnexo(params: {
   origemInterna?: boolean;
 }) {
   return withTenantTransaction(params.municipioId, async (tx) => {
-    const processo = await obterProcessoGenericoOuFalhar(tx, params.processoId);
+    // O lock da linha do processo também serializa o cálculo da próxima versão do
+    // anexo (findFirst max + create), evitando versões duplicadas.
+    const processo = await obterProcessoParaEscrita(tx, params.processoId);
 
     if (params.exigirRequerente && processo.requerenteUtilizadorId !== params.utilizadorUploadId) {
       throw new AnexoNaoAutorizadoError("Só o requerente deste processo pode anexar documentos a ele.");
@@ -1065,8 +1602,8 @@ export async function adicionarAnexo(params: {
       }
       if (!LOCALIZACOES_VALIDAS_PARA_ANEXO_SAIDA.includes(processo.localizacaoActual)) {
         throw new DocumentoSaidaForaDeContextoError(
-          `Só é possível anexar o documento de saída quando o processo está em preparação/despacho de saída. ` +
-          `Localização actual: ${processo.localizacaoActual}. Use preparar-saida primeiro.`
+          `Só é possível anexar o documento de saída enquanto o processo está em tratamento na direcção, ` +
+          `em parecer jurídico ou na fase de saída. Localização actual: ${processo.localizacaoActual}.`
         );
       }
     }
@@ -1140,7 +1677,7 @@ export async function obterAnexoProcesso(params: {
 
 export async function moverParaArquivoDigital(params: { municipioId: string; processoId: string }) {
   return withTenantTransaction(params.municipioId, async (tx) => {
-    const processo = await obterProcessoGenericoOuFalhar(tx, params.processoId);
+    const processo = await obterProcessoParaEscrita(tx, params.processoId);
     if (!ESTADOS_FINAIS.includes(processo.estado)) {
       throw new ProcessoNaoConcluidoError("Só processos Concluídos podem ir para Arquivo Digital.");
     }
@@ -1154,7 +1691,7 @@ export async function moverParaArquivoDigital(params: { municipioId: string; pro
 
 export async function moverParaArquivoMorto(params: { municipioId: string; processoId: string }) {
   return withTenantTransaction(params.municipioId, async (tx) => {
-    const processo = await obterProcessoGenericoOuFalhar(tx, params.processoId);
+    const processo = await obterProcessoParaEscrita(tx, params.processoId);
     if (!processo.arquivoDigitalEm) {
       throw new ProcessoNaoConcluidoError("Um processo só pode ir para Arquivo Morto depois de passar por Arquivo Digital.");
     }
@@ -1281,58 +1818,95 @@ export async function listarProcessos(params: {
   });
 }
 
+/**
+ * Filtro "Aguarda a minha acção": segue a mesma lógica de "de quem é a vez"
+ * (process-engine.vez.ts), em vez de olhar para permissões soltas.
+ */
 async function construirRestricaoAguardaAccao(
   tx: Prisma.TransactionClient,
   municipioId: string,
   utilizadorAlvoId: string
 ): Promise<Prisma.ProcessoGenericoWhereInput> {
-  const [executorAlvo, temDespacharEncaminhamento, temTramitarGabinete, temAtribuirResponsavel] = await Promise.all([
-    tx.utilizador.findUnique({ where: { id: utilizadorAlvoId }, select: { direcaoId: true } }),
-    hasPermission(utilizadorAlvoId, municipioId, "processos_genericos:despachar_encaminhamento"),
-    hasPermission(utilizadorAlvoId, municipioId, "processos_genericos:tramitar_gabinete"),
-    hasPermission(utilizadorAlvoId, municipioId, "processos_genericos:atribuir_responsavel"),
-  ]);
-
-  const podeAgirNoGabinete = temDespacharEncaminhamento || temTramitarGabinete;
+  const ctx = await carregarContextoExecutor(tx, municipioId, utilizadorAlvoId);
+  const L = LocalizacaoProcesso;
+  const locsDeTrabalho = [L.DIRECCAO_COMPETENTE, L.PARECER_ASSESSOR_JURIDICO, L.PREPARACAO_SAIDA];
+  // Com o processo em "Aguardando despacho", a decisão final é do Administrador.
+  const semDecisaoFinalPendente = { estado: { not: "AGUARDANDO_DESPACHO" as const } };
 
   const condicoes: Prisma.ProcessoGenericoWhereInput[] = [
-    { responsavelActualId: utilizadorAlvoId },
-    ...(podeAgirNoGabinete
-      ? [{ localizacaoActual: { in: LOCALIZACOES_ADMINISTRATIVAS_GLOBAIS } } as Prisma.ProcessoGenericoWhereInput]
-      : []),
-    ...(executorAlvo?.direcaoId && temAtribuirResponsavel
-      ? [
-        {
-          responsavelActualId: null,
-          direcaoAtualId: executorAlvo.direcaoId,
-        } as Prisma.ProcessoGenericoWhereInput,
-      ]
-      : []),
+    // Tenho o processo atribuído e a vez é de quem o trata
+    { responsavelActualId: utilizadorAlvoId, localizacaoActual: { in: locsDeTrabalho }, ...semDecisaoFinalPendente },
   ];
+
+  if (ctx.ehChefia && ctx.direcaoId) {
+    condicoes.push(
+      // Chefia: processos da minha direcção ainda sem responsável
+      {
+        direcaoAtualId: ctx.direcaoId,
+        responsavelActualId: null,
+        localizacaoActual: { in: locsDeTrabalho },
+        ...semDecisaoFinalPendente,
+      },
+      // Chefia: respostas de funcionários à espera de serem subidas
+      { direcaoAtualId: ctx.direcaoId, localizacaoActual: L.RESPOSTA_A_SUBIR }
+    );
+  }
+
+  if (ctx.direcaoSigla === SIGLA_SECRETARIA_GERAL) {
+    // SG: apresentar ao Administrador, expedir, entregar respostas ao Gabinete e formalizar saídas
+    condicoes.push({
+      localizacaoActual: { in: [L.EXPEDIENTE, L.EXPEDIENTE_A_ENVIAR, L.EXPEDIENTE_SAIDA_A_FORMALIZAR] },
+    });
+  }
+
+  if (ctx.ehAdministracao || ctx.direcaoSigla === SIGLA_GABINETE_ADMINISTRADOR) {
+    condicoes.push({ localizacaoActual: L.GABINETE_ADMINISTRADOR, ...semDecisaoFinalPendente });
+  }
+
+  if (ctx.ehAdministracao) {
+    condicoes.push({ localizacaoActual: { in: [L.AGUARDA_DESPACHO_ROTEAMENTO, L.AGUARDA_DESPACHO_SAIDA] } });
+    condicoes.push({
+      estado: "AGUARDANDO_DESPACHO",
+      localizacaoActual: { in: [L.DIRECCAO_COMPETENTE, L.PARECER_ASSESSOR_JURIDICO, L.GABINETE_ADMINISTRADOR] },
+    });
+  }
 
   return { OR: condicoes, estado: { not: "CONCLUIDO" } };
 }
 
 
+/**
+ * A Secretaria Geral entrega ao Gabinete a resposta que o director subiu por ela.
+ * (Nome mantido para não partir controllers/rotas.)
+ */
 export async function receberRespostaSubida(params: {
   municipioId: string;
   processoId: string;
   executorId: string;
   observacao?: string;
 }) {
-  return withTenantTransaction(params.municipioId, async (tx) => {
-    const processo = await obterProcessoGenericoOuFalhar(tx, params.processoId);
+  const actualizado = await withTenantTransaction(params.municipioId, async (tx) => {
+    const processo = await obterProcessoParaEscrita(tx, params.processoId);
+    await exigirVez(tx, params.municipioId, params.executorId, processo);
 
-    if (processo.localizacaoActual !== LocalizacaoProcesso.RESPOSTA_A_SUBIR) {
+    if (processo.localizacaoActual !== LocalizacaoProcesso.EXPEDIENTE || processo.estado === EstadoProcessoGenerico.RECEBIDO) {
       throw new CircuitoTransicaoInvalidaError(
-        `Só é possível receber uma resposta subida quando o processo está em "Resposta a subir". ` +
+        `Só é possível entregar uma resposta ao Gabinete quando ela já chegou à Secretaria Geral. ` +
         `Localização actual: ${processo.localizacaoActual}.`
       );
     }
 
     return avancarLocalizacao(tx, processo, LocalizacaoProcesso.GABINETE_ADMINISTRADOR, {
       ...params,
-      observacao: params.observacao ?? "Resposta da direcção recebida no Gabinete do Administrador.",
+      observacao: params.observacao ?? "Resposta recebida pela Secretaria Geral e entregue ao Gabinete do Administrador.",
     });
   });
+
+  await notificarAposMovimento({
+    municipioId: params.municipioId,
+    processoId: params.processoId,
+    executorId: params.executorId,
+    oQueAconteceu: "{quem} (Secretaria Geral) entregou ao Gabinete a resposta da direcção.",
+  });
+  return actualizado;
 }

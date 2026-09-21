@@ -66,13 +66,6 @@ import { centrosRoutes } from "./modules/acao-social/centros/centro.route.js";
 import { casosSensiveisRoutes } from "./modules/acao-social/casos-sensiveis/caso-sensivel.route.js";
 import { programasRoutes } from "./modules/acao-social/programas/programa.route.js";
 import { pedidosApoioRoutes } from "./modules/acao-social/pedidos-apoio/pedido-apoio.route.js";
-// ACHADO DE AUDITORIA: tal como stockRoutes, esta rota existia por
-// completo (listar/criar distribuição de kits de cesta básica — secção
-// 12 da especificação) mas nunca era registada — 404 em todos os
-// endpoints. Confirmado com a mesma verificação sistemática que
-// encontrou o gap do Stock: comparei todos os `export async function
-// *Routes` do projecto contra as chamadas `app.register(...)` deste
-// ficheiro.
 import { distribuicaoKitRoutes } from "./modules/acao-social/distribuicao-kits/distribuicao-kit.route.js";
 import { indicadoresRoutes } from "./modules/acao-social/indicadores/indicadores.route.js";
 import { auditoriaRoutes } from "./modules/auditoria/auditoria.route.js";
@@ -86,14 +79,6 @@ export async function buildApp() {
     logger: true,
     trustProxy: true,
     genReqId: () => randomUUID(),
-    // ACHADO DE AUDITORIA: 10s (omissão do Fastify) é pouco para o
-    // arranque completo desta app (~50 plugins/módulos de rotas
-    // registados sincronamente) em máquinas mais lentas — reportado a
-    // estourar em Windows com `tsx watch`. A correcção principal foi
-    // deixar de bloquear plugins em I/O de rede durante o registo (ver
-    // redis.ts); isto é margem de segurança adicional, não a correcção
-    // em si — um plugin genuinamente preso continua a ser apanhado,
-    // só que aos 30s em vez de aos 10s.
     pluginTimeout: 30_000,
     ajv: {
       customOptions: {
@@ -133,33 +118,16 @@ export async function buildApp() {
     permittedCrossDomainPolicies: { permittedPolicies: "none" },
   });
 
-  // ACHADO DE AUDITORIA (confirmado com teste de carga real, autocannon,
-  // 20 ligações concorrentes, 8s): com max:100/min aplicado globalmente
-  // e sem excepção para /health, 22044 de 22142 pedidos a /health
-  // (99.6%) receberam 429 — não por sobrecarga real do servidor, mas
-  // porque o rate limit é contado por IP, e este ambiente municipal tem
-  // dezenas de funcionários atrás do mesmo NAT/proxy de rede
-  // institucional (ver secção 21 da especificação). Um load balancer ou
-  // Kubernetes a fazer liveness/readiness probe ao /health também
-  // esgotaria este limite sozinho. Corrigido: /health fica isento (não
-  // é uma superfície de abuso, e se falhar sob carga legítima o
-  // orquestrador pode reiniciar a instância exactamente quando está a
-  // servir tráfego real — o pior momento possível). O tecto global subiu
-  // de 100 para 300/min — as rotas sensíveis (login, reset de password,
-  // etc.) já têm os seus próprios limites mais apertados por rota (ver
-  // auth.routes.ts, ex.: 5/15min) e continuam a valer independentemente
-  // deste valor global. 300/min por IP ainda é uma estimativa de
-  // partida, não um número validado com tráfego de produção real —
-  // recomenda-se reavaliar com métricas reais após o piloto em Viana.
+ 
   await app.register(rateLimit, {
     max: 300,
     timeWindow: "1 minute",
   });
   await app.register(compress, { global: true });
 
-  await app.register(redisPlugin);
-  await app.register(socketPlugin);
-  await app.register(bullPlugin);
+await app.register(redisPlugin);
+await app.register(socketPlugin);
+await app.register(bullPlugin);
 
   await app.register(cors, {
     origin: isDevelopment ? true : (env.FRONTEND_URL ? [env.FRONTEND_URL] : []),

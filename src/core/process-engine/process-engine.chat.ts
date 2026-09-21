@@ -135,21 +135,24 @@ export async function enviarMensagemProcesso(params: {
   }
 
   const anexoUrl = mensagem.anexoStorageKey
-  ? await gerarUrlVisualizacao(mensagem.anexoStorageKey, 3600)
-  : null;
+    ? await gerarUrlVisualizacao(mensagem.anexoStorageKey, 3600)
+    : null;
 
-emitirMensagemProcesso(params.processoId, {
-  id: mensagem.id,
-  mensagem: mensagem.mensagem ?? '',
-  autorId: mensagem.autorId,
-  autorNome: mensagem.autor.nomeCompleto,
-  criadoEm: mensagem.criadoEm,
-  anexoUrl,
-  anexoNomeFicheiro: mensagem.anexoNomeFicheiro ?? null,
-  anexoMimeType: mensagem.anexoMimeType ?? null,
-});
+  // O payload do socket é normalizado para o formato REST em
+  // `emitirMensagemProcesso` (ver process-engine.chat.realtime.ts).
+  emitirMensagemProcesso(params.processoId, {
+    id: mensagem.id,
+    mensagem: mensagem.mensagem,
+    autorId: mensagem.autorId,
+    autorNome: mensagem.autor.nomeCompleto,
+    criadoEm: mensagem.criadoEm,
+    anexoUrl,
+    anexoNomeFicheiro: mensagem.anexoNomeFicheiro ?? null,
+    anexoMimeType: mensagem.anexoMimeType ?? null,
+    anexoTamanhoBytes: mensagem.anexoTamanhoBytes ?? null,
+  });
 
-return { ...mensagem, anexoUrl };
+  return { ...mensagem, anexoUrl };
 }
 
 export async function contarNaoLidasProcesso(params: { municipioId: string; processoId: string; viewerId: string }) {

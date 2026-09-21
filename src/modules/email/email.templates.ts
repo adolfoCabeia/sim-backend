@@ -137,11 +137,6 @@ export function contaInternaCriadaEmailTemplate(params: {
         Password: <span style="font-size: 18px; font-weight: bold; letter-spacing: 1px; background: #f2f2f2; padding: 4px 10px; border-radius: 4px; display: inline-block;">${params.password}</span>
       </p>
       <p>
-        A sua conta fica com o estado <strong>PENDENTE_VALIDAÇÃO</strong> até que a sua identidade
-        seja confirmada por um administrador. Guarde esta password em local seguro e não a
-        partilhe com ninguém.
-      </p>
-      <p>
         <a href="${params.loginUrl}"
            style="display: inline-block; padding: 10px 20px; background: #0b5fae; color: #fff; text-decoration: none; border-radius: 4px;">
           Iniciar sessão

@@ -549,6 +549,19 @@ model MovimentoStock {
   @@map("movimentos_stock")
 }
 
+model AlertaStock {
+  id                    String   @id @default(uuid())
+  municipioId           String
+  itemStockId           String
+  nivel                 String
+  ultimoEnviadoEm       DateTime?
+  criadoEm              DateTime @default(now())
+  actualizadoEm         DateTime @updatedAt
+
+  @@unique([itemStockId, nivel])
+  @@index([municipioId])
+}
+
 model ServicoContinuo {
   id             String                @id @default(uuid())
   municipioId    String
@@ -575,6 +588,19 @@ model ServicoContinuo {
   @@index([estado])
   @@index([dataPrevistaEsgotamento])
   @@map("servicos_continuos")
+}
+
+model AlertaServicoContinuo {
+  id                    String   @id @default(uuid())
+  municipioId           String
+  servicoContinuoId     String
+  nivel                 String
+  ultimoEnviadoEm       DateTime?
+  criadoEm              DateTime @default(now())
+  actualizadoEm         DateTime @updatedAt
+
+  @@unique([servicoContinuoId, nivel])
+  @@index([municipioId])
 }
 
 model ManutencaoProgramada {
@@ -1249,7 +1275,7 @@ model Notificacao {
 model ProcessoGenerico {
   id                        String                      @id @default(uuid())
   municipioId               String
-  numero                    String
+  numero                    String                     
   tipo                      TipoProcessoGenerico
   origem                    OrigemProcessoGenerico
   assunto                   String
@@ -1267,6 +1293,7 @@ model ProcessoGenerico {
   escaladoEm                DateTime?
   arquivoDigitalEm          DateTime?
   arquivoMortoEm            DateTime?
+  ultimoLembreteVezEm       DateTime?
   aguardaPagamento          Boolean                     @default(false)
   servicoCodigo             String?
   criadoEm                  DateTime                    @default(now())

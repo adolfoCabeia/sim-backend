@@ -33,25 +33,25 @@ import { requirePermission } from "../../middleware/hasPermission.js";
 export async function servicosDashboardRoutes(fastify: FastifyInstance) {
   fastify.get<{ Querystring: ResumoPagamentosQuery }>(
     "/servicos/dashboard/resumo",
-    { ...obterResumoPagamentosDocs, preHandler: [fastify.authenticate, requirePermission("receitas:read"), validateQuery(resumoPagamentosQuerySchema)] },
+    { ...obterResumoPagamentosDocs, preHandler: [fastify.authenticate, requirePermission("receitas:consultar"), validateQuery(resumoPagamentosQuerySchema)] },
     obterResumoPagamentosController
   );
 
   fastify.get<{ Querystring: ComparacaoPagamentosQuery }>(
     "/servicos/dashboard/comparacao",
-    { ...obterComparacaoPagamentosDocs, preHandler: [fastify.authenticate, requirePermission("receitas:read"), validateQuery(comparacaoPagamentosQuerySchema)] },
+    { ...obterComparacaoPagamentosDocs, preHandler: [fastify.authenticate, requirePermission("receitas:consultar"), validateQuery(comparacaoPagamentosQuerySchema)] },
     obterComparacaoPagamentosController
   );
 
   fastify.get<{ Querystring: EvolucaoPagamentosQuery }>(
     "/servicos/dashboard/evolucao",
-    { ...obterEvolucaoPagamentosDocs, preHandler: [fastify.authenticate, requirePermission("receitas:read"), validateQuery(evolucaoPagamentosQuerySchema)] },
+    { ...obterEvolucaoPagamentosDocs, preHandler: [fastify.authenticate, requirePermission("receitas:consultar"), validateQuery(evolucaoPagamentosQuerySchema)] },
     obterEvolucaoPagamentosController
   );
 
   fastify.get<{ Querystring: RankingDiasPagamentosQuery }>(
     "/servicos/dashboard/ranking-dias",
-    { ...obterRankingDiasPagamentosDocs, preHandler: [fastify.authenticate, requirePermission("receitas:read"), validateQuery(rankingDiasPagamentosQuerySchema)] },
+    { ...obterRankingDiasPagamentosDocs, preHandler: [fastify.authenticate, requirePermission("receitas:consultar"), validateQuery(rankingDiasPagamentosQuerySchema)] },
     obterRankingDiasPagamentosController
   );
 
@@ -59,7 +59,7 @@ export async function servicosDashboardRoutes(fastify: FastifyInstance) {
     "/servicos/dashboard/por-direcao",
     {
       ...obterResumoPorDirecaoPagamentosDocs,
-      preHandler: [fastify.authenticate, requirePermission("receitas:read"), validateQuery(resumoPorDirecaoPagamentosQuerySchema)],
+      preHandler: [fastify.authenticate, requirePermission("receitas:consultar"), validateQuery(resumoPorDirecaoPagamentosQuerySchema)],
     },
     obterResumoPorDirecaoPagamentosController
   );

@@ -13,7 +13,7 @@ export async function auditoriaRoutes(fastify: FastifyInstance) {
     "/auditoria/logs",
     {
       ...listarLogsDocs,
-      preHandler: [fastify.authenticate, requirePermission("auditoria:read")],
+      preHandler: [fastify.authenticate, requirePermission("auditoria:consultar")],
     },
     listarLogsController
   );
@@ -22,7 +22,7 @@ export async function auditoriaRoutes(fastify: FastifyInstance) {
     "/auditoria/logs/:id",
     {
       ...obterLogDocs,
-      preHandler: [fastify.authenticate, requirePermission("auditoria:read")],
+      preHandler: [fastify.authenticate, requirePermission("auditoria:consultar")],
     },
     obterLogController
   );
@@ -31,7 +31,7 @@ export async function auditoriaRoutes(fastify: FastifyInstance) {
     "/auditoria/logs/exportar",
     {
       ...exportarLogsDocs,
-      preHandler: [fastify.authenticate, requirePermission("auditoria:export")],
+      preHandler: [fastify.authenticate, requirePermission("auditoria:consultar")],
     },
     exportarLogsController
   );

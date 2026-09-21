@@ -11,25 +11,7 @@ import { storageService } from "../storage/storage.service.js";
 import { notificarUtilizador } from "../../core/notifications/notification.service.js";
 import { emitirNovaMensagem,emitirMensagensLidas, emitirMudancaEstado, emitirAtribuicao } from "./ocorrencia.realtime.js";
 
-/*
- * ── NOTA SOBRE NOTIFICAÇÕES E EVENTOS EM TEMPO REAL ─────────────────────
- * `notificarUtilizador` faz I/O de rede (envia email quando recebe
- * emailDestino). Tal como no motor de processos, NUNCA deve correr dentro
- * da transação de escrita do negócio: se a rede demorar, a transação
- * (timeout curto) expira e o commit falha com P2028, mesmo já com as
- * escritas prontas.
- *
- * Além disso, os eventos de tempo real (`emitirX`) também não devem ser
- * disparados de dentro da transação: se um passo posterior dentro do
- * mesmo bloco falhar, a transação é revertida, mas o evento já terá sido
- * enviado aos clientes — que passam a ver no ecrã uma mudança de estado
- * ou atribuição que nunca chegou a ser persistida na BD.
- *
- * Padrão adotado abaixo: a transação só lê/escreve na BD e devolve dados
- * simples; notificação e eventos em tempo real disparam depois do commit,
- * com a notificação protegida por try/catch (uma falha de envio nunca
- * desfaz nem falha a ação de negócio já concluída).
- */
+
 async function dispararNotificacao(
   municipioId: string,
   contexto: string,
@@ -298,8 +280,8 @@ export async function responderOcorrencia(params: {
     }
 
     const destinatarioId = ehCriador
-      ? ocorrencia.responsavelId ?? deveAtribuir ? params.autorId : null
-      : ocorrencia.criadoPorId;
+  ? ocorrencia.responsavelId
+  : ocorrencia.criadoPorId;
 
     // Se for o criador a responder e ainda não há responsável, não há para quem notificar.
     let destinatarioParaNotificar: {

@@ -65,10 +65,6 @@ export async function patrimonioRoutes(fastify: FastifyInstance) {
     obterBemController
   );
 
-  // ─── CRUD base ───
-  // Multipart (imagens/fachadas): validação feita manualmente (Zod) dentro
-  // do controller, depois de parseMultipart() — validateBody não serve
-  // aqui porque request.body não é auto-populado para multipart.
   fastify.post(
     "/bens",
     { ...criarBemDocs, preHandler: [fastify.authenticate, requirePermission("patrimonio:gerir")] },

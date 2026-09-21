@@ -1,19 +1,4 @@
-/**
- * ╔══════════════════════════════════════════════════════════════════════════╗
- * ║  PRINCÍPIO OPERACIONAL: "NÃO ESPERAR QUE O SERVIÇO TERMINE PARA REAGIR" ║
- * ║                                                                          ║
- * ║  O motor de alertas deve SEMPRE antecipar a necessidade de revisão ou   ║
- * ║  abastecimento da frota. Nunca reagir depois da avaria ou pane seca.    ║
- * ║                                                                          ║
- * ║  Regras implementadas:                                                   ║
- * ║  1. Alerta URGENTE: revisão em ≤ 7 dias OU km excedido                  ║
- * ║  2. Alerta ATENCAO: revisão em ≤ 15 dias                                ║
- * ║  3. Abastecimento calcula consumo médio para prever próximo abastecer   ║
- * ║  4. Uso de viatura atualiza km e verifica se atingiu limite de revisão  ║
- * ╚══════════════════════════════════════════════════════════════════════════╝
- */
-
-import type { Prisma } from "../../generated/prisma/client.js";
+import { Prisma } from "../../generated/prisma/client.js";
 import { prisma, withTenantTransaction } from "../../config/prisma.js";
 import type {
   FrotaCreateInput,
@@ -92,19 +77,76 @@ export async function obter(id: string) {
 
 export async function criar(municipioId: string, dados: FrotaCreateInput) {
   return withTenantTransaction(municipioId, async (tx) => {
+    const frotaExistente = await tx.frotaOperacional.findUnique({
+      where: {
+        bemId: dados.bemId,
+      },
+      select: {
+        id: true,
+      },
+    });
+
+    if (frotaExistente) {
+      const erro = new Error(
+        "Este bem já está associado a um veículo da frota."
+      );
+
+      erro.name = "CONFLICT";
+      throw erro;
+    }
+
     const payload: Prisma.FrotaOperacionalUncheckedCreateInput = {
       municipioId,
       bemId: dados.bemId,
-      ...(dados.alocacaoActual !== undefined && dados.alocacaoActual !== null && { alocacaoActual: dados.alocacaoActual }),
-      ...(dados.kmActual !== undefined && { kmActual: dados.kmActual }),
-      ...(dados.kmProximaRevisao !== undefined && dados.kmProximaRevisao !== null && { kmProximaRevisao: dados.kmProximaRevisao }),
-      ...(dados.dataUltimaRevisao !== undefined && dados.dataUltimaRevisao !== null && { dataUltimaRevisao: new Date(dados.dataUltimaRevisao) }),
-      ...(dados.dataProximaRevisao !== undefined && dados.dataProximaRevisao !== null && { dataProximaRevisao: new Date(dados.dataProximaRevisao) }),
-      ...(dados.consumoMedio !== undefined && dados.consumoMedio !== null && { consumoMedio: dados.consumoMedio }),
-      ...(dados.ultimoAbastecimento !== undefined && dados.ultimoAbastecimento !== null && { ultimoAbastecimento: new Date(dados.ultimoAbastecimento) }),
-      ...(dados.tipoCombustivel !== undefined && dados.tipoCombustivel !== null && { tipoCombustivel: dados.tipoCombustivel }),
+      ...(dados.alocacaoActual !== undefined &&
+        dados.alocacaoActual !== null && {
+          alocacaoActual: dados.alocacaoActual,
+        }),
+      ...(dados.kmActual !== undefined && {
+        kmActual: dados.kmActual,
+      }),
+      ...(dados.kmProximaRevisao !== undefined &&
+        dados.kmProximaRevisao !== null && {
+          kmProximaRevisao: dados.kmProximaRevisao,
+        }),
+      ...(dados.dataUltimaRevisao !== undefined &&
+        dados.dataUltimaRevisao !== null && {
+          dataUltimaRevisao: new Date(dados.dataUltimaRevisao),
+        }),
+      ...(dados.dataProximaRevisao !== undefined &&
+        dados.dataProximaRevisao !== null && {
+          dataProximaRevisao: new Date(dados.dataProximaRevisao),
+        }),
+      ...(dados.consumoMedio !== undefined &&
+        dados.consumoMedio !== null && {
+          consumoMedio: dados.consumoMedio,
+        }),
+      ...(dados.ultimoAbastecimento !== undefined &&
+        dados.ultimoAbastecimento !== null && {
+          ultimoAbastecimento: new Date(dados.ultimoAbastecimento),
+        }),
+      ...(dados.tipoCombustivel !== undefined &&
+        dados.tipoCombustivel !== null && {
+          tipoCombustivel: dados.tipoCombustivel,
+        }),
     };
-    return tx.frotaOperacional.create({ data: payload });
+
+    try {
+      return await tx.frotaOperacional.create({
+        data: payload,
+      });
+    } catch (error) {
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === "P2002"
+      ) {
+        throw new Error(
+          "Este bem já está associado a um veículo da frota."
+        );
+      }
+
+      throw error;
+    }
   });
 }
 

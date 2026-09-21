@@ -4,11 +4,36 @@ import { withTenantTransaction } from "../../config/prisma.js";
 import { hasPermission } from "../../modules/auth/rbac/rbac.service.js";
 import { transicaoEhValida, ESTADOS_DESPACHO_FINAL } from "./process-engine.states.js";
 import { ProcessoGenericoNaoEncontradoError } from "./process-engine.service.js";
+import {
+  SIGLA_SECRETARIA_GERAL,
+  carregarContextoExecutor,
+  descreverVez,
+  determinarVez,
+  estaEmDireccao,
+  executorTemAVez,
+  podeSubirDirecto,
+  type PapelDaVez,
+} from "./process-engine.vez.js";
+
+const L = LocalizacaoProcesso;
 
 export type AcaoDisponivel = {
   id: string;
   disponivel: boolean;
   motivo?: string;
+  /** Frase amigável para mostrar junto ao botão. */
+  descricao?: string;
+  /** Só em "subir-resposta": para onde a resposta pode subir directamente. */
+  destinosPossiveis?: Array<"SG" | "GAM">;
+};
+
+export type ResumoDaVez = {
+  papel: PapelDaVez;
+  /** true → mostrar "A próxima acção é contigo". */
+  eTuaVez: boolean;
+  /** Texto pronto a mostrar ao utilizador, seja ou não a vez dele. */
+  descricao: string;
+  acaoEsperada: string;
 };
 
 const TRANSICOES_ESTADO: Record<EstadoProcessoGenerico, EstadoProcessoGenerico[]> = {
@@ -26,8 +51,12 @@ export async function listarAcoesDisponiveis(params: {
   municipioId: string;
   processoId: string;
   executorId: string;
-}): Promise<{ acoes: AcaoDisponivel[]; processo: { estado: EstadoProcessoGenerico; localizacaoActual: LocalizacaoProcesso } }> {
-  return withTenantTransaction(params.municipioId, async (tx) => {
+}): Promise<{
+  acoes: AcaoDisponivel[];
+  processo: { estado: EstadoProcessoGenerico; localizacaoActual: LocalizacaoProcesso; direcaoAtualId: string | null };
+  vez: ResumoDaVez;
+}> {
+  return withTenantTransaction(params.municipioId, async (tx: Prisma.TransactionClient) => {
     const processo = await tx.processoGenerico.findUnique({
       where: { id: params.processoId },
       select: {
@@ -38,141 +67,163 @@ export async function listarAcoesDisponiveis(params: {
         direcaoDespachadaId: true,
         arquivoDigitalEm: true,
         arquivoMortoEm: true,
-        servicoCodigo: true,
       },
     });
     if (!processo) {
       throw new ProcessoGenericoNaoEncontradoError("Processo não encontrado.");
     }
 
-    const [
-      temDespacharEncaminhamento,
-      temTramitarGabinete,
-      temExpedir,
-      temAtribuirResponsavel,
-      temTransicionar,
-      temDespachoFinal,
-      temArquivarDigital,
-      temArquivoMorto,
-    ] = await Promise.all([
-      hasPermission(params.executorId, params.municipioId, "processos_genericos:despachar_encaminhamento"),
-      hasPermission(params.executorId, params.municipioId, "processos_genericos:tramitar_gabinete"),
-      hasPermission(params.executorId, params.municipioId, "processos_genericos:expedir"),
-      hasPermission(params.executorId, params.municipioId, "processos_genericos:atribuir_responsavel"),
-      hasPermission(params.executorId, params.municipioId, "processos_genericos:transicionar"),
-      hasPermission(params.executorId, params.municipioId, "processos_genericos:despacho_final"),
+    const [ctx, temArquivarDigital, temArquivoMorto] = await Promise.all([
+      carregarContextoExecutor(tx, params.municipioId, params.executorId),
       hasPermission(params.executorId, params.municipioId, "processos_genericos:arquivar_digital"),
       hasPermission(params.executorId, params.municipioId, "arquivo_morto:aceder"),
     ]);
 
-    const podeAgirGabinete = temDespacharEncaminhamento || temTramitarGabinete;
-    const ehResponsavelOuLivre =
-      !processo.responsavelActualId || processo.responsavelActualId === params.executorId;
-    const podeSobrepor = temDespacharEncaminhamento || temTramitarGabinete; // chefias
-
     const loc = processo.localizacaoActual;
     const est = processo.estado;
 
-    function acao(id: string, disponivel: boolean, motivo?: string): AcaoDisponivel {
-      return { id, disponivel, ...(motivo && { motivo }) };
+    // ── De quem é a vez? ──────────────────────────────────────────────
+    const vez = determinarVez(processo);
+    const eTuaVez = executorTemAVez(vez, ctx, processo);
+    const daVez = (papel: PapelDaVez) => eTuaVez && vez.papel === papel;
+    const daVezDeQuemTrata = eTuaVez && (vez.papel === "RESPONSAVEL" || vez.papel === "CHEFIA_DIRECCAO");
+
+    const emDireccao = estaEmDireccao(loc);
+    const semResponsavel = !processo.responsavelActualId;
+    const decisaoFinalTomada = est === "DEFERIDO" || est === "INDEFERIDO";
+    const sobeDirecto = podeSubirDirecto(ctx, processo);
+
+    // Nomes só para o texto amigável de quem não tem a vez
+    const [direcaoAtual, responsavel] = await Promise.all([
+      processo.direcaoAtualId
+        ? tx.direcao.findUnique({ where: { id: processo.direcaoAtualId }, select: { nome: true, sigla: true } })
+        : null,
+      processo.responsavelActualId
+        ? tx.utilizador.findUnique({ where: { id: processo.responsavelActualId }, select: { nomeCompleto: true } })
+        : null,
+    ]);
+
+    function acao(id: string, disponivel: boolean, descricao?: string, extra: Partial<AcaoDisponivel> = {}): AcaoDisponivel {
+      return { id, disponivel, ...(descricao && { descricao }), ...extra };
     }
+
+    // Se a resposta já está na SG, a única opção de destino é o Gabinete.
+    const destinosPossiveis: Array<"SG" | "GAM"> =
+      direcaoAtual?.sigla === SIGLA_SECRETARIA_GERAL ? ["GAM"] : ["SG", "GAM"];
+
+    // Regra: antes de subir a resposta (qualquer via) é preciso ter anexado o documento com a resposta.
+    const podeSubir = daVezDeQuemTrata && (emDireccao || loc === L.RESPOSTA_A_SUBIR);
+    const temDocumentoDeResposta = podeSubir
+      ? (await tx.processoGenericoAnexo.count({ where: { processoId: params.processoId, tipoAnexo: "SAIDA" } })) > 0
+      : true;
 
     const acoes: AcaoDisponivel[] = [
       acao(
-        "receber-resposta-subida",
-        loc === LocalizacaoProcesso.RESPOSTA_A_SUBIR && podeAgirGabinete
+        "apresentar-administrador",
+        loc === L.EXPEDIENTE && est === "RECEBIDO" && daVez("SECRETARIA_GERAL"),
+        "Apresentar o processo ao Administrador para ele dar o despacho."
       ),
       acao(
-        "apresentar-administrador",
-        loc === LocalizacaoProcesso.EXPEDIENTE && temTramitarGabinete
+        "receber-resposta-subida",
+        loc === L.EXPEDIENTE && est !== "RECEBIDO" && daVez("SECRETARIA_GERAL"),
+        "Confirmar que a resposta chegou à Secretaria Geral e entregá-la ao Gabinete do Administrador."
       ),
       acao(
         "despachar-direccao",
-        loc === LocalizacaoProcesso.AGUARDA_DESPACHO_ROTEAMENTO && temDespacharEncaminhamento
+        loc === L.AGUARDA_DESPACHO_ROTEAMENTO && daVez("ADMINISTRADOR"),
+        "Indicar a direcção que vai tratar o processo. Se for a Secretaria Geral, o processo fica logo lá, sem passo de expedição."
       ),
       acao(
         "despachar-assessor-juridico",
-        loc === LocalizacaoProcesso.AGUARDA_DESPACHO_ROTEAMENTO && temDespacharEncaminhamento
+        loc === L.AGUARDA_DESPACHO_ROTEAMENTO && daVez("ADMINISTRADOR"),
+        "Pedir parecer ao Assessor Jurídico."
       ),
       acao(
         "expedir-direccao",
-        loc === LocalizacaoProcesso.EXPEDIENTE_A_ENVIAR && temExpedir
+        loc === L.EXPEDIENTE_A_ENVIAR && daVez("SECRETARIA_GERAL"),
+        "Enviar formalmente o processo para a direcção indicada pelo Administrador."
       ),
       acao(
         "auto-atribuir",
-        (loc === LocalizacaoProcesso.DIRECCAO_COMPETENTE || loc === LocalizacaoProcesso.PARECER_ASSESSOR_JURIDICO) &&
-          !processo.responsavelActualId &&
-          temAtribuirResponsavel
+        emDireccao && semResponsavel && daVez("CHEFIA_DIRECCAO"),
+        "Ficar tu com este processo."
       ),
       acao(
         "atribuir-funcionario",
-        (loc === LocalizacaoProcesso.DIRECCAO_COMPETENTE || loc === LocalizacaoProcesso.PARECER_ASSESSOR_JURIDICO) &&
-          !processo.responsavelActualId &&
-          temAtribuirResponsavel
+        emDireccao && semResponsavel && daVez("CHEFIA_DIRECCAO"),
+        "Distribuir o processo a um funcionário da direcção."
       ),
       acao(
         "subir-resposta",
-        (loc === LocalizacaoProcesso.DIRECCAO_COMPETENTE || loc === LocalizacaoProcesso.PARECER_ASSESSOR_JURIDICO) &&
-          (temExpedir || temTramitarGabinete) &&
-          (ehResponsavelOuLivre || podeSobrepor)
+        podeSubir && temDocumentoDeResposta,
+        sobeDirecto
+          ? "Subir a resposta directamente, à Secretaria Geral ou ao Gabinete do Administrador (tu escolhes)."
+          : "Enviar a resposta à chefia da direcção, que a sobe.",
+        {
+          ...(sobeDirecto && temDocumentoDeResposta && { destinosPossiveis }),
+          ...(podeSubir &&
+            !temDocumentoDeResposta && {
+              motivo:
+                "Antes de subir a resposta, anexa o documento com a resposta ao pedido (tipo «Documento de saída»). " +
+                "O cidadão só o vê quando o processo estiver concluído.",
+            }),
+        }
       ),
       acao(
         "preparar-saida",
-        loc === LocalizacaoProcesso.DIRECCAO_COMPETENTE &&
-          ["DEFERIDO", "INDEFERIDO"].includes(est) &&
-          temTransicionar &&
-          (ehResponsavelOuLivre || podeSobrepor)
+        loc === L.DIRECCAO_COMPETENTE && decisaoFinalTomada && daVezDeQuemTrata,
+        "Começar a preparar o documento de saída."
       ),
       acao(
         "submeter-despacho-saida",
-        loc === LocalizacaoProcesso.PREPARACAO_SAIDA &&
-          ["DEFERIDO", "INDEFERIDO"].includes(est) &&
-          temTransicionar &&
-          (ehResponsavelOuLivre || podeSobrepor)
+        loc === L.PREPARACAO_SAIDA && decisaoFinalTomada && daVezDeQuemTrata,
+        "Enviar o documento de saída ao Administrador para autorização."
       ),
       acao(
         "despachar-saida",
-        loc === LocalizacaoProcesso.AGUARDA_DESPACHO_SAIDA &&
-          ["DEFERIDO", "INDEFERIDO"].includes(est) &&
-          temDespacharEncaminhamento
+        loc === L.AGUARDA_DESPACHO_SAIDA && decisaoFinalTomada && daVez("ADMINISTRADOR"),
+        "Autorizar ou recusar a saída do documento."
       ),
       acao(
         "formalizar-envio-externo",
-        loc === LocalizacaoProcesso.EXPEDIENTE_SAIDA_A_FORMALIZAR &&
-          ["DEFERIDO", "INDEFERIDO"].includes(est) &&
-          temExpedir
+        loc === L.EXPEDIENTE_SAIDA_A_FORMALIZAR && decisaoFinalTomada && daVez("SECRETARIA_GERAL"),
+        "Registar o envio formal do documento ao exterior."
       ),
     ];
 
+    // ── Decidir ───────────────────────────────────────────────────────
     const opcoesDecisao = TRANSICOES_ESTADO[est] ?? [];
     const exigeDespachoFinal = opcoesDecisao.some((o) => ESTADOS_DESPACHO_FINAL.includes(o));
     const locsDecisaoValidas: Partial<Record<EstadoProcessoGenerico, LocalizacaoProcesso[]>> = {
-      RECEBIDO: [LocalizacaoProcesso.DIRECCAO_COMPETENTE, LocalizacaoProcesso.PARECER_ASSESSOR_JURIDICO],
-      EM_ANALISE: [
-        LocalizacaoProcesso.DIRECCAO_COMPETENTE,
-        LocalizacaoProcesso.PARECER_ASSESSOR_JURIDICO,
-        LocalizacaoProcesso.GABINETE_ADMINISTRADOR,
-      ],
-      EM_PARECER: [
-        LocalizacaoProcesso.DIRECCAO_COMPETENTE,
-        LocalizacaoProcesso.PARECER_ASSESSOR_JURIDICO,
-        LocalizacaoProcesso.GABINETE_ADMINISTRADOR,
-      ],
-      AGUARDANDO_DESPACHO: [LocalizacaoProcesso.DIRECCAO_COMPETENTE, LocalizacaoProcesso.GABINETE_ADMINISTRADOR],
-      DEVOLVIDO: [LocalizacaoProcesso.DIRECCAO_COMPETENTE, LocalizacaoProcesso.GABINETE_ADMINISTRADOR],
+      RECEBIDO: [L.DIRECCAO_COMPETENTE, L.PARECER_ASSESSOR_JURIDICO],
+      EM_ANALISE: [L.DIRECCAO_COMPETENTE, L.PARECER_ASSESSOR_JURIDICO, L.GABINETE_ADMINISTRADOR],
+      EM_PARECER: [L.DIRECCAO_COMPETENTE, L.PARECER_ASSESSOR_JURIDICO, L.GABINETE_ADMINISTRADOR],
+      AGUARDANDO_DESPACHO: [L.DIRECCAO_COMPETENTE, L.GABINETE_ADMINISTRADOR],
+      DEVOLVIDO: [L.DIRECCAO_COMPETENTE, L.GABINETE_ADMINISTRADOR],
     };
     const locsPermitidas = locsDecisaoValidas[est];
     const primeiroEstado = opcoesDecisao[0];
+
+    // A decisão final (Deferido/Indeferido) é um acto legal: continua a exigir a permissão.
+    // Todas as outras decisões seguem a vez.
+    const decidirNaVez = exigeDespachoFinal ? daVez("ADMINISTRADOR") && ctx.podeDespachoFinal : eTuaVez;
+
     const decidirDisponivel =
-    opcoesDecisao.length > 0 &&
-    primeiroEstado !== undefined &&
-    transicaoEhValida(est, primeiroEstado) &&
+      opcoesDecisao.length > 0 &&
+      primeiroEstado !== undefined &&
+      transicaoEhValida(est, primeiroEstado) &&
       (!locsPermitidas || locsPermitidas.includes(loc)) &&
       !processo.arquivoMortoEm &&
-      (exigeDespachoFinal ? temDespachoFinal : temTransicionar) &&
-      (ehResponsavelOuLivre || podeSobrepor);
-    acoes.push(acao("decidir", decidirDisponivel));
+      decidirNaVez;
+    acoes.push(
+      acao(
+        "decidir",
+        decidirDisponivel,
+        exigeDespachoFinal ? "Dar o despacho final: deferir ou indeferir." : "Registar a decisão / o próximo estado do processo."
+      )
+    );
 
+    // ── Arquivo (continua por permissão: é tarefa administrativa, não faz parte do circuito) ──
     acoes.push(acao("arquivar-digital", est === "CONCLUIDO" && !processo.arquivoDigitalEm && temArquivarDigital));
     acoes.push(
       acao(
@@ -181,6 +232,17 @@ export async function listarAcoesDisponiveis(params: {
       )
     );
 
-    return { acoes: acoes.filter((a) => a.disponivel || a.motivo), processo: { estado: est, localizacaoActual: loc } };
+    return {
+      acoes: acoes.filter((a) => a.disponivel || a.motivo),
+      processo: { estado: est, localizacaoActual: loc, direcaoAtualId: processo.direcaoAtualId },
+      vez: {
+        papel: vez.papel,
+        eTuaVez,
+        acaoEsperada: vez.acaoEsperada,
+        descricao: eTuaVez
+          ? `A próxima acção é contigo: ${vez.acaoEsperada}`
+          : descreverVez(vez, { direcao: direcaoAtual?.nome ?? null, responsavel: responsavel?.nomeCompleto ?? null }),
+      },
+    };
   });
 }

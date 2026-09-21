@@ -1,6 +1,7 @@
 import type { Prisma } from "../../generated/prisma/client.js";
 import { withTenantTransaction } from "../../config/prisma.js";
 import { notificarUtilizador } from "../../core/process-engine/process-engine.notifications.js";
+import { dispararEnviosPendentes, type EnviosPendentes } from "../../core/notifications/notification.service.js";
 import type {
   ConfirmarPagamentoInput,
   CancelarPagamentoInput,
@@ -14,14 +15,21 @@ export class PagamentoJaProcessadoError extends Error {}
 export class PagamentoNaoAutorizadoError extends Error {}
 export class PagamentoExpiradoError extends Error {}
 
-
+/*
+ * Mesmo padrão do process-engine: a transacção só faz a escrita "APP" da
+ * notificação e devolve os `EnviosPendentes`; o envio real de email/SMS
+ * acontece depois do commit, fora de qualquer transacção.
+ */
 async function dispararNotificacao(
   municipioId: string,
   contexto: string,
-  fn: (tx: Prisma.TransactionClient) => Promise<void>
+  fn: (tx: Prisma.TransactionClient) => Promise<EnviosPendentes | EnviosPendentes[] | void>
 ): Promise<void> {
   try {
-    await withTenantTransaction(municipioId, fn);
+    const resultado = await withTenantTransaction(municipioId, fn);
+    if (!resultado) return;
+    const lista = Array.isArray(resultado) ? resultado : [resultado];
+    await dispararEnviosPendentes(contexto, ...lista);
   } catch (err) {
     // eslint-disable-next-line no-console
     console.error(`[notificacao] Falha ao notificar (${contexto}):`, err);
@@ -34,6 +42,42 @@ async function obterPagamentoOuFalhar(tx: Prisma.TransactionClient, pagamentoId:
     throw new PagamentoNaoEncontradoError("Pagamento não encontrado.");
   }
   return pagamento;
+}
+
+/**
+ * Bloqueia a linha do processo até ao fim da transacção. É o MESMO lock usado pelo
+ * process-engine (`transicionar`, etc.), por isso confirmar/cancelar um pagamento e
+ * transicionar o processo ficam serializados entre si (sem corrida sobre `aguardaPagamento`).
+ *
+ * Implementado com um UPDATE do Prisma (não depende do nome da tabela nem do tipo do id).
+ */
+async function bloquearProcesso(tx: Prisma.TransactionClient, processoId: string): Promise<void> {
+  try {
+    await tx.processoGenerico.update({
+      where: { id: processoId },
+      data: { alteradoEm: new Date() },
+      select: { id: true },
+    });
+  } catch (err) {
+    if ((err as { code?: string } | null)?.code === "P2025") {
+      throw new PagamentoNaoEncontradoError("Processo do pagamento não encontrado.");
+    }
+    throw err;
+  }
+}
+
+/**
+ * Obtém o pagamento para o alterar, com a ordem de locks fixa: PROCESSO primeiro.
+ *  1. lê o pagamento só para saber o processoId (imutável);
+ *  2. bloqueia o processo;
+ *  3. relê o pagamento já com o lock, para ver o estado mais recente.
+ * Todas as operações que alteram pagamentos passam por aqui, por isso serializam
+ * por processo e não há risco de deadlock (o process-engine só bloqueia o processo).
+ */
+async function obterPagamentoParaEscrita(tx: Prisma.TransactionClient, pagamentoId: string) {
+  const previo = await obterPagamentoOuFalhar(tx, pagamentoId);
+  await bloquearProcesso(tx, previo.processoId);
+  return obterPagamentoOuFalhar(tx, pagamentoId);
 }
 
 export async function listarPagamentosDoProcesso(params: {
@@ -123,16 +167,18 @@ export async function confirmarPagamento(params: {
 }) {
   // 1) Transação: só leituras/escritas de negócio. Nada de rede aqui.
   const { actualizado, requerenteParaNotificar } = await withTenantTransaction(params.municipioId, async (tx) => {
-    const pagamento = await obterPagamentoOuFalhar(tx, params.pagamentoId);
+    // Lock do processo + leitura fresca do pagamento.
+    const pagamento = await obterPagamentoParaEscrita(tx, params.pagamentoId);
     if (pagamento.estado !== "PENDENTE") {
       throw new PagamentoJaProcessadoError(
         `Este pagamento já está com o estado "${pagamento.estado}" — só é possível confirmar pagamentos PENDENTES.`
       );
     }
 
-    // 1. Atualizar pagamento
-    const actualizado = await tx.pagamento.update({
-      where: { id: pagamento.id },
+    // 1. Atualizar pagamento (compare-and-set: só actualiza se ainda estiver PENDENTE).
+    // Protege também contra o job de expiração, que altera pagamentos sem passar pelo lock do processo.
+    const resultado = await tx.pagamento.updateMany({
+      where: { id: pagamento.id, estado: "PENDENTE" },
       data: {
         estado: "PAGO",
         pagoEm: new Date(),
@@ -145,8 +191,14 @@ export async function confirmarPagamento(params: {
         } as Prisma.InputJsonValue,
       },
     });
+    if (resultado.count === 0) {
+      throw new PagamentoJaProcessadoError(
+        "Este pagamento deixou de estar PENDENTE (foi cancelado, expirou ou já foi confirmado)."
+      );
+    }
+    const actualizado = await tx.pagamento.findUniqueOrThrow({ where: { id: pagamento.id } });
 
-    // 2. Atualizar processo
+    // 2. Atualizar processo (linha já bloqueada por esta transacção)
     const processo = await tx.processoGenerico.update({
       where: { id: pagamento.processoId },
       data: { aguardaPagamento: false },
@@ -212,7 +264,7 @@ export async function confirmarPagamento(params: {
   // 2) Notificação: fora da transação de escrita, só depois do commit.
   if (requerenteParaNotificar) {
     await dispararNotificacao(params.municipioId, `confirmarPagamento:${params.pagamentoId}`, async (tx) => {
-      await notificarUtilizador(tx, {
+      return notificarUtilizador(tx, {
         utilizadorDestinoId: requerenteParaNotificar.utilizadorDestinoId,
         titulo: `Pagamento confirmado, Processo ${requerenteParaNotificar.numeroProcesso}`,
         mensagem: `Recebemos o seu pagamento da referência ${requerenteParaNotificar.referencia}. O seu processo ${requerenteParaNotificar.numeroProcesso} já está a ser tratado.`,
@@ -235,15 +287,19 @@ export async function ajustarValorPagamento(params: {
   input: AjustarValorPagamentoInput;
 }) {
   return withTenantTransaction(params.municipioId, async (tx) => {
-    const pagamento = await obterPagamentoOuFalhar(tx, params.pagamentoId);
+    const pagamento = await obterPagamentoParaEscrita(tx, params.pagamentoId);
     if (pagamento.estado !== "PENDENTE") {
       throw new PagamentoJaProcessadoError("Só é possível ajustar o valor de um pagamento ainda PENDENTE.");
     }
 
-    const actualizado = await tx.pagamento.update({
-      where: { id: pagamento.id },
+    const resultado = await tx.pagamento.updateMany({
+      where: { id: pagamento.id, estado: "PENDENTE" },
       data: { valor: params.input.valor },
     });
+    if (resultado.count === 0) {
+      throw new PagamentoJaProcessadoError("Só é possível ajustar o valor de um pagamento ainda PENDENTE.");
+    }
+    const actualizado = await tx.pagamento.findUniqueOrThrow({ where: { id: pagamento.id } });
 
     await tx.logAuditoria.create({
       data: {
@@ -269,15 +325,21 @@ export async function cancelarPagamento(params: {
   const { criarPagamentoParaProcessoTx } = await import("./pagamento.internal.js");
 
   return withTenantTransaction(params.municipioId, async (tx) => {
-    const pagamento = await obterPagamentoOuFalhar(tx, params.pagamentoId);
+    // O lock do processo serializa cancelamentos concorrentes: sem ele, dois
+    // cancelamentos simultâneos criavam dois pagamentos de substituição.
+    const pagamento = await obterPagamentoParaEscrita(tx, params.pagamentoId);
     if (pagamento.estado !== "PENDENTE") {
       throw new PagamentoJaProcessadoError("Só é possível cancelar um pagamento ainda PENDENTE.");
     }
 
-    const cancelado = await tx.pagamento.update({
-      where: { id: pagamento.id },
+    const resultado = await tx.pagamento.updateMany({
+      where: { id: pagamento.id, estado: "PENDENTE" },
       data: { estado: "CANCELADO" },
     });
+    if (resultado.count === 0) {
+      throw new PagamentoJaProcessadoError("Só é possível cancelar um pagamento ainda PENDENTE.");
+    }
+    const cancelado = await tx.pagamento.findUniqueOrThrow({ where: { id: pagamento.id } });
 
     await tx.logAuditoria.create({
       data: {
@@ -313,6 +375,12 @@ export async function obterResumoPagamentos(params: { municipioId: string; utili
   });
 }
 
+/**
+ * Job de expiração. O `updateMany` com filtro `estado: "PENDENTE"` é atómico por linha:
+ * se uma confirmação fizer commit entretanto, essa linha deixa de corresponder ao filtro
+ * e não é expirada. A confirmação, por sua vez, usa compare-and-set, por isso os dois
+ * lados nunca sobrescrevem o resultado um do outro.
+ */
 export async function marcarPagamentosExpirados(params: { municipioId: string }) {
   return withTenantTransaction(params.municipioId, async (tx) => {
     const resultado = await tx.pagamento.updateMany({

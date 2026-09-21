@@ -64,8 +64,7 @@ function hashToken(token: string): string {
 
 export async function registerUser(input: RegisterInput) {
   if ((input.tipoConta as string) === "COMISSAO_MORADORES") {
-    // Defesa em profundidade: o schema Zod já não aceita este valor no
-    // registo público, mas mantemos o guard caso o schema mude no futuro.
+
     throw new RegistoComissaoNaoPermitidoError(
       "Contas de Comissão de Moradores são criadas por um funcionário municipal, não pelo registo público.",
     );
@@ -588,7 +587,7 @@ export async function loginUser(
     ...(context.userAgent !== undefined && { userAgent: context.userAgent }),
   });
 
-  await withTenantTransaction(
+   await withTenantTransaction(
     utilizador.municipioId,
     async (tx: Prisma.TransactionClient) => {
       await tx.logAuditoria.create({
@@ -606,6 +605,7 @@ export async function loginUser(
         data: {
           online: true,
           ultimoLoginEm: new Date(),
+          ultimoLogoutEm: null,
           ...(context.ipOrigem !== undefined && {
             ultimoIpLogin: context.ipOrigem,
           }),
