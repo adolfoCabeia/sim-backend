@@ -650,34 +650,45 @@ model FrotaOperacional {
 }
 
 model Direcao {
-  id                               String                  @id @default(uuid())
-  municipioId                      String
-  nome                             String
-  sigla                            String
-  descricao                        String?
-  tipo                             TipoOrgao               @default(DIRECCAO_EXECUTIVA_DESCONCENTRADA)
-  areaResponsabilidade             AreaResponsabilidade?
+  id                                String                  @id @default(uuid())
+  municipioId                       String
+  nome                              String
+  sigla                             String
+  descricao                         String?
+  tipo                              TipoOrgao               @default(DIRECCAO_EXECUTIVA_DESCONCENTRADA)
+  areaResponsabilidade              AreaResponsabilidade?
   responsavel                      String?
-  contacto                         String?
+  contacto                          String?
+  directorId                        String?                 @unique
+
   permiteIntercambioInterMunicipal Boolean                 @default(false)
-  criadoEm                         DateTime                @default(now())
-  alteradoEm                       DateTime                @updatedAt
-  contactosInstitucionais          ContactoInstitucional[]
+
+  criadoEm                          DateTime                @default(now())
+  alteradoEm                        DateTime                @updatedAt
+
+  contactosInstitucionais           ContactoInstitucional[]
   departamentos                    Departamento[]
-  municipio                        Municipio               @relation(fields: [municipioId], references: [id])
-  documentos                       Documento[]
-  pastas                           Pasta[]
-  intercambiosEnviados             Intercambio[]
-  processosGenericosAtual          ProcessoGenerico[]      @relation("ProcessosGenericosAtual")
-  processosGenericosDespachada     ProcessoGenerico[]      @relation("ProcessosGenericosDespachada")
-  processosGenericosOrigem         ProcessoGenerico[]      @relation("ProcessosGenericosOrigem")
-  utilizadores                     Utilizador[]
-  requisicoesLogistica             RequisicaoLogistica[]
-  bems                             Bem[]
-  centrosAcolhimento               CentroAcolhimento[]
-  funcionarios                     Funcionario[]
-  receitas                         Receita[]
-  servicos                         Servico[]
+
+  municipio                         Municipio               @relation(fields: [municipioId], references: [id])
+
+  documentos                        Documento[]
+  pastas                            Pasta[]
+
+  intercambiosEnviados              Intercambio[]
+
+  processosGenericosAtual           ProcessoGenerico[]      @relation("ProcessosGenericosAtual")
+  processosGenericosDespachada      ProcessoGenerico[]      @relation("ProcessosGenericosDespachada")
+  processosGenericosOrigem          ProcessoGenerico[]      @relation("ProcessosGenericosOrigem")
+
+  director                          Utilizador?             @relation("DirecaoDirector", fields: [directorId], references: [id])
+  utilizadores                      Utilizador[]            @relation("DirecaoUtilizadores")
+
+  requisicoesLogistica              RequisicaoLogistica[]
+  bems                              Bem[]
+  centrosAcolhimento                CentroAcolhimento[]
+  funcionarios                      Funcionario[]
+  receitas                          Receita[]
+  servicos                          Servico[]
 
   @@unique([municipioId, sigla])
   @@unique([municipioId, nome])
@@ -876,7 +887,7 @@ model Utilizador {
   nomeEmpresa                       String?
   nifEmpresa                        String?                     @unique
   nomeInstituicao                   String?
-  nipcInstituicao                   String?                     @unique
+  nipcInstituicao                  String?                     @unique
   nomeComissao                      String?
   bairroZona                        String?
   cargoComissao                     String?
@@ -888,52 +899,62 @@ model Utilizador {
   mfaSecret                         String?
   deveTrocarPassword                Boolean                     @default(false)
   tentativasLoginFalhadas           Int                         @default(0)
-  online         Boolean   @default(false)
-  ultimoLoginEm  DateTime?
-  ultimoLogoutEm DateTime?
-  ultimoIpLogin  String?
-  comissaoModeradores ComissaoModeradores? @relation("ComissaoUtilizador")
-  comissoesCriadas    ComissaoModeradores[] @relation("ComissaoCriadaPor")
+  online                            Boolean                     @default(false)
+  ultimoLoginEm                     DateTime?
+  ultimoLogoutEm                    DateTime?
+  ultimoIpLogin                     String?
   bloqueadoAte                      DateTime?
   ativo                             Boolean                     @default(true)
   criadoEm                          DateTime                    @default(now())
   alteradoEm                        DateTime                    @updatedAt
-  agendamentosChamados              Agendamento[]               @relation("AgendamentoChamadoPor")
-  agendamentosAtendidos             Agendamento[]               @relation("AgendamentosAtendidos")
-  agendamentosComoRequerente        Agendamento[]               @relation("AgendamentosComoRequerente")
-  contactosInstitucionaisCriados    ContactoInstitucional[]     @relation("ContactoInstitucionalCriadoPor")
-  conteudosPublicosCriados          ConteudoPublico[]           @relation("ConteudoPublicoCriadoPor")
-  conteudosPublicosPublicados       ConteudoPublico[]           @relation("ConteudoPublicoPublicadoPor")
+
+  direcaoQueDirige                  Direcao?                    @relation("DirecaoDirector")
+  direcao                           Direcao?                    @relation("DirecaoUtilizadores", fields: [direcaoId], references: [id])
+
+  comissaoModeradores               ComissaoModeradores?         @relation("ComissaoUtilizador")
+  comissoesCriadas                  ComissaoModeradores[]        @relation("ComissaoCriadaPor")
+
+  agendamentosChamados              Agendamento[]                @relation("AgendamentoChamadoPor")
+  agendamentosAtendidos             Agendamento[]                @relation("AgendamentosAtendidos")
+  agendamentosComoRequerente        Agendamento[]                @relation("AgendamentosComoRequerente")
+
+  contactosInstitucionaisCriados    ContactoInstitucional[]      @relation("ContactoInstitucionalCriadoPor")
+  conteudosPublicosCriados          ConteudoPublico[]             @relation("ConteudoPublicoCriadoPor")
+  conteudosPublicosPublicados       ConteudoPublico[]             @relation("ConteudoPublicoPublicadoPor")
+
   documentos                        Documento[]
-  emailConfirmationToken            EmailConfirmationToken[]
+  emailConfirmationToken             EmailConfirmationToken[]
   funcionario                       Funcionario?
   logAuditoria                      LogAuditoria[]
   notificacoes                      Notificacao[]
   pagamentosCriados                 Pagamento[]
   passwordResetTokens               PasswordResetToken[]
   pedidosValidacao                  PedidoValidacaoIdentidade[]
-  processosGenericosComoRequerente  ProcessoGenerico[]          @relation("ProcessosGenericosComoRequerente")
-  processosGenericosComoResponsavel ProcessoGenerico[]          @relation("ProcessosGenericosResponsavel")
-  processoGenericoAnexos            ProcessoGenericoAnexo[]
-  processoGenericoTransicoes        ProcessoGenericoTransicao[]
-  refreshToken                      RefreshToken[]
-  perfisAtribuidos                  UtilizadorPerfil[]          @relation("PerfisAtribuidosPorMim")
-  perfis                            UtilizadorPerfil[]          @relation("PerfisDoUtilizador")
-  departamento                      Departamento?               @relation(fields: [departamentoId], references: [id])
-  direcao                           Direcao?                    @relation(fields: [direcaoId], references: [id])
-  municipio                         Municipio                   @relation(fields: [municipioId], references: [id])
-  superior                          Utilizador?                 @relation("HierarquiaUtilizador", fields: [superiorId], references: [id])
-  subordinados                      Utilizador[]                @relation("HierarquiaUtilizador")
+
+  processosGenericosComoRequerente  ProcessoGenerico[]           @relation("ProcessosGenericosComoRequerente")
+  processosGenericosComoResponsavel ProcessoGenerico[]            @relation("ProcessosGenericosResponsavel")
+  processoGenericoAnexos             ProcessoGenericoAnexo[]
+  processoGenericoTransicoes         ProcessoGenericoTransicao[]
+  refreshToken                       RefreshToken[]
+
+  perfisAtribuidos                  UtilizadorPerfil[]            @relation("PerfisAtribuidosPorMim")
+  perfis                            UtilizadorPerfil[]             @relation("PerfisDoUtilizador")
+
+  departamento                      Departamento?                @relation(fields: [departamentoId], references: [id])
+  municipio                         Municipio                    @relation(fields: [municipioId], references: [id])
+  superior                          Utilizador?                  @relation("HierarquiaUtilizador", fields: [superiorId], references: [id])
+  subordinados                      Utilizador[]                 @relation("HierarquiaUtilizador")
+
   requisicoesLogistica              RequisicaoLogistica[]
-  ocorrenciasCriadas                Ocorrencia[]                @relation("OcorrenciasCriadas")
-  ocorrenciasAtribuidas             Ocorrencia[]                @relation("OcorrenciasAtribuidas")
+  ocorrenciasCriadas                Ocorrencia[]                 @relation("OcorrenciasCriadas")
+  ocorrenciasAtribuidas             Ocorrencia[]                 @relation("OcorrenciasAtribuidas")
   ocorrenciaMensagems               OcorrenciaMensagem[]
-  pedidoApoiosResolvidos            PedidoApoio[]               @relation("PedidoApoioResolvidoPor")
-  distribuicaoKitsRealizadas        DistribuicaoKit[]           @relation("DistribuicaoKitRealizadoPor")
-  receitasCriadas                   Receita[]                   @relation("ReceitasCriadasPor")
-  receitasAlteradas                 Receita[]                   @relation("ReceitasAlteradasPor")
-  servicosCriados                   Servico[]                   @relation("ServicosCriadosPor")
-  servicosAlterados                 Servico[]                   @relation("ServicosAlteradosPor")
+  pedidoApoiosResolvidos             PedidoApoio[]                @relation("PedidoApoioResolvidoPor")
+  distribuicaoKitsRealizadas         DistribuicaoKit[]             @relation("DistribuicaoKitRealizadoPor")
+  receitasCriadas                   Receita[]                    @relation("ReceitasCriadasPor")
+  receitasAlteradas                 Receita[]                    @relation("ReceitasAlteradasPor")
+  servicosCriados                   Servico[]                    @relation("ServicosCriadosPor")
+  servicosAlterados                 Servico[]                    @relation("ServicosAlteradosPor")
   processoGenericoMensagems         ProcessoGenericoMensagem[]
 
   @@index([municipioId])
@@ -1394,6 +1415,8 @@ model ProcessoGenericoAnexo {
   processoId          String
   nomeFicheiro        String
   storageKey          String
+  assinadoEm          DateTime?
+  storageKeyAssinado String?
   versao              Int               @default(1)
   tipoDocumentoCodigo String?
   tipoAnexo           TipoAnexoProcesso @default(ENTRADA)

@@ -14,6 +14,19 @@ const pedidoApoioObject = {
     resolvidoEm: { type: "string", format: "date-time", nullable: true },
   },
 };
+const pedidoApoioListadoObject = {
+  ...pedidoApoioObject,
+  properties: {
+    ...pedidoApoioObject.properties,
+    beneficiario: {
+      type: "object",
+      properties: {
+        nome: { type: "string" },
+        bairro: { type: "string", nullable: true },
+      },
+    },
+  },
+};
 
 const errorResponse = (description: string) => ({
   type: "object",
@@ -119,7 +132,7 @@ export const listarPedidosApoioDocs = {
           data: {
             type: "object",
             properties: {
-              items: { type: "array", items: pedidoApoioObject },
+              items: { type: "array", items: pedidoApoioListadoObject },
               page: { type: "integer" },
               pageSize: { type: "integer" },
               total: { type: "integer" },

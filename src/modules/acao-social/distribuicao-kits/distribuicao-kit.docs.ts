@@ -13,6 +13,28 @@ const distribuicaoObject = {
   },
 };
 
+// Item da listagem: o service faz include de beneficiario e centroAcolhimento.
+const distribuicaoListadaObject = {
+  ...distribuicaoObject,
+  properties: {
+    ...distribuicaoObject.properties,
+    beneficiario: {
+      type: "object",
+      properties: {
+        nome: { type: "string" },
+        bairro: { type: "string", nullable: true },
+      },
+    },
+    centroAcolhimento: {
+      type: "object",
+      nullable: true,
+      properties: {
+        nome: { type: "string" },
+      },
+    },
+  },
+};
+
 const errorResponse = (description: string) => ({
   type: "object",
   description,
@@ -70,7 +92,7 @@ export const listarDistribuicoesDocs = {
           data: {
             type: "object",
             properties: {
-              items: { type: "array", items: distribuicaoObject },
+              items: { type: "array", items: distribuicaoListadaObject },
               page: { type: "integer" },
               pageSize: { type: "integer" },
               total: { type: "integer" },

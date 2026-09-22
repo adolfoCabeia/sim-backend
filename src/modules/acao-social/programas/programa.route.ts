@@ -32,13 +32,13 @@ import { requireAnyPermission } from "../../../middleware/hasPermission.js";
 export async function programasRoutes(fastify: FastifyInstance) {
   fastify.get<{ Querystring: ListarProgramasQuery }>(
     "/programas",
-    { ...listarProgramasDocs },
+    { ...listarProgramasDocs, preHandler: [fastify.authenticate] },
     listarProgramasController,
   );
 
   fastify.get<{ Params: { id: string } }>(
     "/programas/:id",
-    { ...obterProgramaDocs },
+    { ...obterProgramaDocs, preHandler: [fastify.authenticate] },
     obterProgramaController,
   );
 

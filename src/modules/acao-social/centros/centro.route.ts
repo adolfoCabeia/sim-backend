@@ -38,7 +38,7 @@ export async function centrosRoutes(fastify: FastifyInstance) {
 
   fastify.get<{ Params: { id: string } }>(
     "/centros/:id",
-    { ...obterCentroDocs, preHandler: [fastify.authenticate] },
+    { ...obterCentroDocs, preHandler: [fastify.authenticate, requireAnyPermission("acao-social:centros:consultar"),] },
     obterCentroController,
   );
 

@@ -7,7 +7,9 @@ import { ProcessoGenericoNaoEncontradoError } from "./process-engine.service.js"
 import {
   SIGLA_SECRETARIA_GERAL,
   carregarContextoExecutor,
+  descreverChefia,
   descreverVez,
+  tituloDaChefia,
   determinarVez,
   estaEmDireccao,
   executorTemAVez,
@@ -55,6 +57,8 @@ export async function listarAcoesDisponiveis(params: {
   acoes: AcaoDisponivel[];
   processo: { estado: EstadoProcessoGenerico; localizacaoActual: LocalizacaoProcesso; direcaoAtualId: string | null };
   vez: ResumoDaVez;
+  /** Documento de saída mais recente do processo (o que as assinaturas cobrem), ou null. */
+  anexoSaidaId: string | null;
 }> {
   return withTenantTransaction(params.municipioId, async (tx: Prisma.TransactionClient) => {
     const processo = await tx.processoGenerico.findUnique({
@@ -91,17 +95,21 @@ export async function listarAcoesDisponiveis(params: {
     const emDireccao = estaEmDireccao(loc);
     const semResponsavel = !processo.responsavelActualId;
     const decisaoFinalTomada = est === "DEFERIDO" || est === "INDEFERIDO";
-    const sobeDirecto = podeSubirDirecto(ctx, processo);
+    // Só o DIRECTOR da direcção que trata o processo sobe a resposta; os outros enviam-na ao director.
+    const ehDirectorDaDireccao = podeSubirDirecto(ctx, processo);
 
     // Nomes só para o texto amigável de quem não tem a vez
     const [direcaoAtual, responsavel] = await Promise.all([
       processo.direcaoAtualId
-        ? tx.direcao.findUnique({ where: { id: processo.direcaoAtualId }, select: { nome: true, sigla: true } })
+        ? tx.direcao.findUnique({ where: { id: processo.direcaoAtualId }, select: { nome: true, sigla: true, directorId: true } })
         : null,
       processo.responsavelActualId
         ? tx.utilizador.findUnique({ where: { id: processo.responsavelActualId }, select: { nomeCompleto: true } })
         : null,
     ]);
+
+    // Direcção sem chefia definida (ex.: a Secretaria Geral no início): ninguém tem a vez de "chefia".
+    const semChefiaDefinida = vez.papel === "CHEFIA_DIRECCAO" && !!direcaoAtual && !direcaoAtual.directorId;
 
     function acao(id: string, disponivel: boolean, descricao?: string, extra: Partial<AcaoDisponivel> = {}): AcaoDisponivel {
       return { id, disponivel, ...(descricao && { descricao }), ...extra };
@@ -111,11 +119,21 @@ export async function listarAcoesDisponiveis(params: {
     const destinosPossiveis: Array<"SG" | "GAM"> =
       direcaoAtual?.sigla === SIGLA_SECRETARIA_GERAL ? ["GAM"] : ["SG", "GAM"];
 
-    // Regra: antes de subir a resposta (qualquer via) é preciso ter anexado o documento com a resposta.
-    const podeSubir = daVezDeQuemTrata && (emDireccao || loc === L.RESPOSTA_A_SUBIR);
-    const temDocumentoDeResposta = podeSubir
-      ? (await tx.processoGenericoAnexo.count({ where: { processoId: params.processoId, tipoAnexo: "SAIDA" } })) > 0
-      : true;
+    // Regra: antes de subir/enviar a resposta é preciso ter anexado o documento com a resposta.
+    const podeTratarResposta = daVezDeQuemTrata && (emDireccao || loc === L.RESPOSTA_A_SUBIR);
+    // Último documento de saída anexado: é o que se assina (e o que o cidadão receberá).
+    const ultimoAnexoSaida = await tx.processoGenericoAnexo.findFirst({
+      where: { processoId: params.processoId, tipoAnexo: "SAIDA" },
+      orderBy: { criadoEm: "desc" },
+      select: { id: true },
+    });
+    const temDocumentoDeResposta = podeTratarResposta ? ultimoAnexoSaida !== null : true;
+    const motivoSemDocumento = (verbo: string) =>
+      `Antes de ${verbo} a resposta, anexa o documento com a resposta ao pedido (tipo «Documento de saída»). ` +
+      "O cidadão só o vê quando o processo estiver concluído.";
+
+    const podeSubir = podeTratarResposta && ehDirectorDaDireccao;
+    const podeEnviarAoDirector = podeTratarResposta && !ehDirectorDaDireccao;
 
     const acoes: AcaoDisponivel[] = [
       acao(
@@ -156,17 +174,18 @@ export async function listarAcoesDisponiveis(params: {
       acao(
         "subir-resposta",
         podeSubir && temDocumentoDeResposta,
-        sobeDirecto
-          ? "Subir a resposta directamente, à Secretaria Geral ou ao Gabinete do Administrador (tu escolhes)."
-          : "Enviar a resposta à chefia da direcção, que a sobe.",
+        "Subir a resposta directamente, à Secretaria Geral ou ao Gabinete do Administrador (tu escolhes).",
         {
-          ...(sobeDirecto && temDocumentoDeResposta && { destinosPossiveis }),
-          ...(podeSubir &&
-            !temDocumentoDeResposta && {
-              motivo:
-                "Antes de subir a resposta, anexa o documento com a resposta ao pedido (tipo «Documento de saída»). " +
-                "O cidadão só o vê quando o processo estiver concluído.",
-            }),
+          ...(podeSubir && temDocumentoDeResposta && { destinosPossiveis }),
+          ...(podeSubir && !temDocumentoDeResposta && { motivo: motivoSemDocumento("subir") }),
+        }
+      ),
+      acao(
+        "enviar-resposta-chefia",
+        podeEnviarAoDirector && temDocumentoDeResposta,
+        `Enviar a resposta a ${descreverChefia(direcaoAtual?.sigla, direcaoAtual?.nome)}, que a sobe.`,
+        {
+          ...(podeEnviarAoDirector && !temDocumentoDeResposta && { motivo: motivoSemDocumento("enviar") }),
         }
       ),
       acao(
@@ -235,13 +254,21 @@ export async function listarAcoesDisponiveis(params: {
     return {
       acoes: acoes.filter((a) => a.disponivel || a.motivo),
       processo: { estado: est, localizacaoActual: loc, direcaoAtualId: processo.direcaoAtualId },
+      anexoSaidaId: ultimoAnexoSaida?.id ?? null,
       vez: {
         papel: vez.papel,
         eTuaVez,
         acaoEsperada: vez.acaoEsperada,
         descricao: eTuaVez
           ? `A próxima acção é contigo: ${vez.acaoEsperada}`
-          : descreverVez(vez, { direcao: direcaoAtual?.nome ?? null, responsavel: responsavel?.nomeCompleto ?? null }),
+          : semChefiaDefinida
+            ? `A ${direcaoAtual?.nome ?? "direcção"} ainda não tem ${tituloDaChefia(direcaoAtual?.sigla)} definido, ` +
+              "por isso ninguém pode agir neste momento. O Administrador tem de o indicar em Direcções."
+            : descreverVez(vez, {
+                direcao: direcaoAtual?.nome ?? null,
+                direcaoSigla: direcaoAtual?.sigla ?? null,
+                responsavel: responsavel?.nomeCompleto ?? null,
+              }),
       },
     };
   });

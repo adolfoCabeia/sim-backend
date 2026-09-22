@@ -13,13 +13,8 @@ import type { RegistarPontoInput } from "./ponto.schema.js";
 export { horaLuanda, inicioDoDiaLuanda, dentroDoHorarioPermitido };
 
 export class FuncionarioNaoEncontradoError extends Error {}
-// Novo: um funcionário só pode ter um registo de cada tipo (ENTRADA/SAIDA)
-// por dia — pedido explícito.
 export class RegistoDuplicadoError extends Error {}
 
-// Dados do Utilizador necessários para notificar directamente o próprio
-// funcionário (nome, email, telefone) — mesmo padrão usado no
-// funcionario.service.ts para não duplicar estes campos.
 const UTILIZADOR_CONTACTO_SELECT = {
   id: true,
   nomeCompleto: true,

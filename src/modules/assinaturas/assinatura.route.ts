@@ -5,6 +5,7 @@ import { assinarDocumentoSchema } from "./assinatura.schema.js";
 import type { AssinarDocumentoInput, ListarAssinaturasQuery } from "./assinatura.schema.js";
 import { validateBody } from "../../utils/validate.js";
 import { AssinaturaNaoEncontradaError, ConteudoNaoResolvivelError } from "./assinatura.errors.js";
+import { AssinaturaNaoAutorizadaError } from "./assinatura.anexo-saida.js";
 
 export async function assinaturasRoutes(fastify: FastifyInstance) {
   fastify.setErrorHandler((error, _req, reply) => {
@@ -13,6 +14,9 @@ export async function assinaturasRoutes(fastify: FastifyInstance) {
     }
     if (error instanceof ConteudoNaoResolvivelError) {
       return reply.status(422).send({ message: error.message });
+    }
+    if (error instanceof AssinaturaNaoAutorizadaError) {
+      return reply.status(403).send({ message: error.message });
     }
     throw error; // cai no error handler global da aplicação
   });
@@ -43,7 +47,7 @@ export async function assinaturasRoutes(fastify: FastifyInstance) {
     controller.verificarPublicoController
   );
 
-    fastify.get<{ Params: { tipo: string; id: string } }>(
+  fastify.get<{ Params: { tipo: string; id: string } }>(
     "/assinaturas/:tipo/:id/pdf",
     {
       ...docs.gerarPdfDocs,

@@ -212,6 +212,7 @@ export async function changePasswordController(
   request: FastifyRequest<{ Body: ChangePasswordInput }>,
   reply: FastifyReply
 ) {
+  console.log("BODY CHANGE PASSWORD:", request.body);
   try {
     await trocarPassword({
       utilizadorId: request.user.sub,

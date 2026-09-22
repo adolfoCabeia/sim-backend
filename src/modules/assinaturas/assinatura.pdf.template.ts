@@ -1,49 +1,55 @@
 type EmissaoParaPdf = {
-    referenciaTipo: string;
-    referenciaId: string;
-    versao: number;
-    conteudoSnapshot: string;
-    codigoVerificacao: string;
-    criadoEm: Date;
+  referenciaTipo: string;
+  referenciaId: string;
+  versao: number;
+  conteudoSnapshot: string;
+  codigoVerificacao: string;
+  criadoEm: Date;
 };
 
 type AssinaturaParaPdf = {
-    signatarioNome: string;
-    tipoAssinatura: string;
-    criadoEm: Date;
+  signatarioNome: string;
+  tipoAssinatura: string;
+  criadoEm: Date;
 };
 
 const TITULOS_TIPO: Record<string, string> = {
-    PARECER_JURIDICO: "Parecer Jurídico",
-    DESPACHO: "Despacho",
-    CONTRATO: "Contrato",
-    AUTO_FISCALIZACAO: "Auto de Fiscalização",
+  PARECER_JURIDICO: "Parecer Jurídico",
+  DESPACHO: "Despacho",
+  CONTRATO: "Contrato",
+  AUTO_FISCALIZACAO: "Auto de Fiscalização",
 };
 
 function formatarData(d: Date): string {
-    return d.toLocaleDateString("pt-AO", { day: "2-digit", month: "long", year: "numeric" });
+  return d.toLocaleDateString("pt-AO", {
+    day: "2-digit",
+    month: "long",
+    year: "numeric",
+  });
 }
 
 export function construirHtmlDocumento(params: {
-    emissao: EmissaoParaPdf;
-    assinaturas: AssinaturaParaPdf[];
-    qrDataUrl: string;
-    nomeMunicipio: string;
+  emissao: EmissaoParaPdf;
+  assinaturas: AssinaturaParaPdf[];
+  qrDataUrl: string;
+  nomeMunicipio: string;
 }): string {
-    const titulo = TITULOS_TIPO[params.emissao.referenciaTipo] ?? params.emissao.referenciaTipo;
+  const titulo =
+    TITULOS_TIPO[params.emissao.referenciaTipo] ??
+    params.emissao.referenciaTipo;
 
-    const blocosAssinatura = params.assinaturas
-        .map(
-            (a) => `
+  const blocosAssinatura = params.assinaturas
+    .map(
+      (a) => `
         <div class="assinatura">
           <div class="linha"></div>
           <p class="nome">${escaparHtml(a.signatarioNome)}</p>
           <p class="detalhe">${escaparHtml(a.tipoAssinatura)} — ${formatarData(a.criadoEm)}</p>
-        </div>`
-        )
-        .join("");
+        </div>`,
+    )
+    .join("");
 
-    return `<!DOCTYPE html>
+  return `<!DOCTYPE html>
 <html lang="pt-AO">
 <head>
 <meta charset="UTF-8" />
@@ -91,9 +97,9 @@ export function construirHtmlDocumento(params: {
 }
 
 function escaparHtml(valor: string): string {
-    return valor
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;")
-        .replace(/"/g, "&quot;");
+  return valor
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 }

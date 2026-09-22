@@ -17,7 +17,25 @@ import type { AssinarDocumentoInput } from "./assinatura.schema.js";
 import { obterBrowser } from "./assinatura.pdf.browser.js";
 import { construirHtmlDocumento } from "./assinatura.pdf.template.js";
 import { gerarQrVerificacao } from "./qrcode.util.js";
+import {
+  REFERENCIA_ANEXO_SAIDA,
+  construirPdfAssinadoDoAnexo,
+  garantirPodeAssinarAnexoSaida,
+  nomeFicheiroDoSnapshot,
+  persistirCopiaAssinada,
+  resolverConteudoAnexoSaida,
+} from "./assinatura.anexo-saida.js";
 
+/**
+ * O documento de saída de um processo (PDF) é assinado pelo seu conteúdo exacto; os restantes tipos
+ * continuam a usar o resolvedor de sempre.
+ */
+async function resolverConteudo(referenciaTipo: string, referenciaId: string, municipioId: string) {
+  if (referenciaTipo === REFERENCIA_ANEXO_SAIDA) {
+    return resolverConteudoAnexoSaida(referenciaId, municipioId);
+  }
+  return resolverConteudoAtual(referenciaTipo, referenciaId, municipioId);
+}
 
 async function obterOuCriarEmissaoAtual(params: {
   municipioId: string;
@@ -62,7 +80,19 @@ export async function assinarDocumento(params: {
   ipOrigem?: string | undefined;
   dados: AssinarDocumentoInput;
 }) {
-  const conteudo = await resolverConteudoAtual(params.dados.referenciaTipo, params.dados.referenciaId, params.municipioId);
+  // `referenciaTipo` vem do schema (enum); comparamos como string para não depender de o enum já incluir ANEXO_SAIDA.
+  const referenciaTipo: string = params.dados.referenciaTipo;
+
+  // Quem assina o documento de saída tem de ter uma razão para isso neste processo.
+  if (referenciaTipo === REFERENCIA_ANEXO_SAIDA) {
+    await garantirPodeAssinarAnexoSaida({
+      municipioId: params.municipioId,
+      utilizadorId: params.signatarioId,
+      anexoId: params.dados.referenciaId,
+    });
+  }
+
+  const conteudo = await resolverConteudo(referenciaTipo, params.dados.referenciaId, params.municipioId);
   if (conteudo === null) {
     throw new ConteudoNaoResolvivelError("Não foi possível obter o conteúdo actual do documento.");
   }
@@ -90,7 +120,7 @@ export async function assinarDocumento(params: {
 
   const assinaturaDigital = assinarPayload(payload, chavePrivada);
 
-  return withTenantTransaction(params.municipioId, (tx) =>
+  const assinatura = await withTenantTransaction(params.municipioId, (tx) =>
     tx.assinaturaEletronica.create({
       data: {
         municipioId: params.municipioId,
@@ -105,6 +135,20 @@ export async function assinarDocumento(params: {
       include: { emissao: true },
     })
   );
+
+  // O documento de saída passa a sair com as assinaturas e o QR de verificação: gera-se a cópia
+  // assinada a cada nova assinatura. Se falhar, a assinatura já está registada e a cópia pode ser
+  // regenerada mais tarde (GET /assinaturas/ANEXO_SAIDA/:id/pdf).
+  if (referenciaTipo === REFERENCIA_ANEXO_SAIDA) {
+    try {
+      await persistirCopiaAssinada({ municipioId: params.municipioId, anexoId: params.dados.referenciaId });
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error("[assinaturas] Assinatura registada, mas não foi possível gerar a cópia assinada do PDF:", err);
+    }
+  }
+
+  return assinatura;
 }
 
 export async function listarAssinaturas(params: { municipioId: string; referenciaTipo: string; referenciaId: string }) {
@@ -117,8 +161,15 @@ export async function listarAssinaturas(params: { municipioId: string; referenci
   );
 }
 
+async function resolverNomeSignatario(signatarioId: string, municipioId: string): Promise<string> {
+  return withTenantTransaction(municipioId, async (tx) => {
+    const utilizador = await tx.utilizador.findUnique({ where: { id: signatarioId } });
+    return utilizador?.nomeCompleto ?? "Signatário desconhecido";
+  });
+}
+
 async function verificarDocumentoPublico(params: { municipioId: string; referenciaTipo: string; referenciaId: string }) {
-  const conteudoAtual = await resolverConteudoAtual(params.referenciaTipo, params.referenciaId, params.municipioId);
+  const conteudoAtual = await resolverConteudo(params.referenciaTipo, params.referenciaId, params.municipioId);
   if (conteudoAtual === null) {
     throw new AssinaturaNaoEncontradaError("Documento não encontrado.");
   }
@@ -141,10 +192,13 @@ async function verificarDocumentoPublico(params: { municipioId: string; referenc
 
   const assinaturasVerificadas = await Promise.all(
     ultimaEmissao.assinaturas.map(async (a) => {
+      const signatarioNome = await resolverNomeSignatario(a.signatarioId, params.municipioId);
+
       if (a.algoritmo === "HMAC_LEGADO") {
         if (!a.assinaturaHmac) {
           return {
             signatarioId: a.signatarioId,
+            signatarioNome,
             valida: false,
             algoritmo: "HMAC_LEGADO" as const,
             motivo: "assinatura_legado_corrompida" as const,
@@ -157,6 +211,7 @@ async function verificarDocumentoPublico(params: { municipioId: string; referenc
         });
         return {
           signatarioId: a.signatarioId,
+          signatarioNome,
           valida: hmacsIguais(a.assinaturaHmac, hmacRecalculado),
           algoritmo: "HMAC_LEGADO" as const,
           criadoEm: a.criadoEm,
@@ -168,6 +223,7 @@ async function verificarDocumentoPublico(params: { municipioId: string; referenc
       if (!chave || !a.assinaturaDigital) {
         return {
           signatarioId: a.signatarioId,
+          signatarioNome,
           valida: false,
           algoritmo: "ED25519" as const,
           motivo: "chave_publica_ausente" as const,
@@ -186,6 +242,7 @@ async function verificarDocumentoPublico(params: { municipioId: string; referenc
 
       return {
         signatarioId: a.signatarioId,
+        signatarioNome,
         valida: verificarPayload(payload, a.assinaturaDigital, carregarChavePublica(chave.chavePublica)),
         algoritmo: "ED25519" as const,
         criadoEm: a.criadoEm,
@@ -203,6 +260,11 @@ async function verificarDocumentoPublico(params: { municipioId: string; referenc
     versao: ultimaEmissao.versao,
     versaoMaisRecente: ultimaEmissao.substituidaPorId === null,
     codigoVerificacao: ultimaEmissao.codigoVerificacao,
+    // Para a página pública dizer, em linguagem simples, de que documento se trata.
+    documento: {
+      tipo: params.referenciaTipo,
+      nome: nomeFicheiroDoSnapshot(ultimaEmissao.conteudoSnapshot),
+    },
     assinaturas: assinaturasVerificadas,
   };
 }
@@ -236,19 +298,17 @@ export async function verificarDocumentoPublicoPorCodigo(codigo: string) {
   });
 }
 
-async function resolverNomeSignatario(signatarioId: string, municipioId: string): Promise<string> {
-  return withTenantTransaction(municipioId, async (tx) => {
-    const utilizador = await tx.utilizador.findUnique({ where: { id: signatarioId } });
-    return utilizador?.nomeCompleto ?? "Signatário desconhecido";
-  });
-}
-
 export async function gerarPdfDocumento(params: {
   municipioId: string;
   referenciaTipo: string;
   referenciaId: string;
   nomeMunicipio: string;
 }): Promise<Buffer> {
+  // Documento de saída: devolve o PDF do próprio documento, carimbado com as assinaturas e o QR.
+  if (params.referenciaTipo === REFERENCIA_ANEXO_SAIDA) {
+    return construirPdfAssinadoDoAnexo({ municipioId: params.municipioId, anexoId: params.referenciaId });
+  }
+
   const emissao = await withTenantTransaction(params.municipioId, (tx) =>
     tx.emissaoDocumento.findFirst({
       where: { referenciaTipo: params.referenciaTipo, referenciaId: params.referenciaId },

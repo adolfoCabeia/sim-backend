@@ -32,7 +32,7 @@ export type PapelDaVez =
   | "ADMINISTRADOR" // Administrador (ou adjunto): despachos e decisões finais
   | "GABINETE" // Administrador + pessoal do GAM
   | "SECRETARIA_GERAL" // pessoal da SG
-  | "CHEFIA_DIRECCAO" // chefia da direcção que tem o processo
+  | "CHEFIA_DIRECCAO" // director da direcção que tem o processo
   | "RESPONSAVEL" // funcionário a quem o processo está atribuído
   | "NINGUEM";
 
@@ -146,8 +146,11 @@ export type ContextoExecutor = {
   direcaoSigla: string | null;
   /** Administrador, adjunto, super-admin (ou quem tem o despacho de encaminhamento). */
   ehAdministracao: boolean;
-  /** Chefia de direcção (quem distribui trabalho ao seu pessoal). */
-  ehChefia: boolean;
+  /**
+   * Director da SUA direcção: é o `Direcao.directorId` dessa direcção (e o utilizador pertence-lhe).
+   * Não depende de perfis nem de permissões.
+   */
+  ehDirector: boolean;
   /** Acto legal: só quem tem esta permissão pode deferir/indeferir. */
   podeDespachoFinal: boolean;
 };
@@ -157,15 +160,15 @@ export async function carregarContextoExecutor(
   municipioId: string,
   utilizadorId: string
 ): Promise<ContextoExecutor> {
-  const [utilizador, perfis, podeDespachar, ehChefiaPorPermissao, podeDespachoFinal] = await Promise.all([
+  const [utilizador, perfis, podeDespachar, podeDespachoFinal, direcaoQueDirige] = await Promise.all([
     tx.utilizador.findUnique({ where: { id: utilizadorId }, select: { direcaoId: true } }),
     tx.utilizadorPerfil.findMany({
       where: { utilizadorId, perfil: { activo: true } },
       select: { perfil: { select: { nome: true } } },
     }),
     hasPermission(utilizadorId, municipioId, "processos_genericos:despachar_encaminhamento"),
-    hasPermission(utilizadorId, municipioId, "processos_genericos:atribuir_responsavel"),
     hasPermission(utilizadorId, municipioId, "processos_genericos:despacho_final"),
+    tx.direcao.findFirst({ where: { directorId: utilizadorId, municipioId }, select: { id: true } }),
   ]);
 
   const direcaoId = utilizador?.direcaoId ?? null;
@@ -179,31 +182,23 @@ export async function carregarContextoExecutor(
     direcaoId,
     direcaoSigla: direcao?.sigla ?? null,
     ehAdministracao: nomes.some((n) => PERFIS_ADMINISTRACAO.includes(n)) || podeDespachar,
-    // "Chefia" = quem distribui trabalho na direcção (é assim que o sistema já a reconhece).
-    ehChefia: ehChefiaPorPermissao,
+    // Defensivo: se o director foi mudado de direcção sem limpar o cargo, deixa de contar como director.
+    ehDirector: direcaoQueDirige !== null && direcaoQueDirige.id === direcaoId,
     podeDespachoFinal,
   };
 }
 
-export function ehChefiaDaDireccao(ctx: ContextoExecutor, direcaoId: string | null): boolean {
-  return ctx.ehChefia && ctx.direcaoId !== null && ctx.direcaoId === direcaoId;
+export function ehDirectorDaDireccao(ctx: ContextoExecutor, direcaoId: string | null): boolean {
+  return ctx.ehDirector && ctx.direcaoId !== null && ctx.direcaoId === direcaoId;
 }
 
 /**
- * Sobe a resposta directamente, sem passo intermédio:
- *  - a Administração;
- *  - o director da direcção que tem o processo;
- *  - o Assessor Jurídico, que sobe o seu parecer sem passar pela chefia de outra direcção.
+ * Só o DIRECTOR da direcção que está a tratar o processo sobe a resposta (à SG ou ao Gabinete).
+ * Nem a Administração, nem o Assessor, nem quem tenha "certa permissão".
+ * Os restantes funcionários enviam a resposta ao director, que a sobe.
  */
-export function podeSubirDirecto(
-  ctx: ContextoExecutor,
-  processo: { direcaoAtualId: string | null; localizacaoActual: LocalizacaoProcesso }
-): boolean {
-  return (
-    ctx.ehAdministracao ||
-    ehChefiaDaDireccao(ctx, processo.direcaoAtualId) ||
-    processo.localizacaoActual === L.PARECER_ASSESSOR_JURIDICO
-  );
+export function podeSubirDirecto(ctx: ContextoExecutor, processo: { direcaoAtualId: string | null }): boolean {
+  return ehDirectorDaDireccao(ctx, processo.direcaoAtualId);
 }
 
 export function executorTemAVez(
@@ -211,7 +206,7 @@ export function executorTemAVez(
   ctx: ContextoExecutor,
   processo: { direcaoAtualId: string | null }
 ): boolean {
-  const chefia = ehChefiaDaDireccao(ctx, processo.direcaoAtualId);
+  const director = ehDirectorDaDireccao(ctx, processo.direcaoAtualId);
   switch (vez.papel) {
     case "ADMINISTRADOR":
       return ctx.ehAdministracao;
@@ -220,7 +215,7 @@ export function executorTemAVez(
     case "SECRETARIA_GERAL":
       return ctx.direcaoSigla === SIGLA_SECRETARIA_GERAL;
     case "CHEFIA_DIRECCAO":
-      return ctx.ehAdministracao || chefia;
+      return director;
     case "RESPONSAVEL":
       // Enquanto o processo está atribuído a um funcionário, a vez é SÓ dele.
       // A chefia volta a ter a vez quando ele sobe a resposta (RESPOSTA_A_SUBIR).
@@ -253,6 +248,21 @@ async function porDireccaoSigla(tx: Prisma.TransactionClient, municipioId: strin
     select: { id: true },
   });
   return direcao ? porDireccaoId(tx, municipioId, direcao.id) : [];
+}
+
+async function directoresDaDireccao(tx: Prisma.TransactionClient, municipioId: string, direcaoId: string): Promise<LinhaUtilizador[]> {
+  const direcao = await tx.direcao.findFirst({
+    where: { id: direcaoId, municipioId },
+    select: {
+      director: {
+        select: { id: true, email: true, nomeCompleto: true, estado: true, tipoConta: true, direcaoId: true },
+      },
+    },
+  });
+  const d = direcao?.director;
+  // O director tem de estar activo, ser interno e continuar a pertencer a esta direcção.
+  if (!d || d.estado !== "ACTIVA" || d.tipoConta !== "INTERNO" || d.direcaoId !== direcaoId) return [];
+  return [{ id: d.id, email: d.email, nomeCompleto: d.nomeCompleto }];
 }
 
 async function administradorMunicipal(tx: Prisma.TransactionClient, municipioId: string): Promise<LinhaUtilizador[]> {
@@ -289,16 +299,7 @@ export async function resolverDestinatariosDaVez(
       break;
     case "CHEFIA_DIRECCAO": {
       if (!vez.direcaoId) break;
-      const pessoal = await porDireccaoId(tx, municipioId, vez.direcaoId);
-      const chefias = (
-        await Promise.all(
-          pessoal.map(async (u) =>
-            (await hasPermission(u.id, municipioId, "processos_genericos:atribuir_responsavel")) ? u : null
-          )
-        )
-      ).filter((u): u is LinhaUtilizador => u !== null);
-      // Se a direcção não tiver chefia configurada, avisa todo o pessoal para o processo não ficar parado.
-      linhas = chefias.length > 0 ? chefias : pessoal;
+      linhas = await directoresDaDireccao(tx, municipioId, vez.direcaoId);
       break;
     }
     case "RESPONSAVEL": {
@@ -315,15 +316,36 @@ export async function resolverDestinatariosDaVez(
   return [...unicos.values()].map((u) => ({ utilizadorId: u.id, email: u.email, nomeCompleto: u.nomeCompleto }));
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Textos amigáveis
+// ─────────────────────────────────────────────────────────────────────────────
+
 /** Para quem NÃO tem a vez: explica onde está o processo e o que falta. */
-export function descreverVez(vez: Vez, nomes: { direcao?: string | null; responsavel?: string | null } = {}): string {
+/**
+ * Título da chefia máxima de uma direcção. A Secretaria Geral é chefiada pelo Secretário Geral;
+ * as restantes por um director.
+ */
+export function tituloDaChefia(sigla: string | null | undefined): string {
+  return sigla === SIGLA_SECRETARIA_GERAL ? "Secretário Geral" : "director";
+}
+
+/** "o Secretário Geral" / "o director da Educação" — para frases. */
+export function descreverChefia(sigla: string | null | undefined, nomeDireccao?: string | null): string {
+  if (sigla === SIGLA_SECRETARIA_GERAL) return "o Secretário Geral";
+  return nomeDireccao ? `o director da ${nomeDireccao}` : "o director da direcção";
+}
+
+export function descreverVez(
+  vez: Vez,
+  nomes: { direcao?: string | null; direcaoSigla?: string | null; responsavel?: string | null } = {}
+): string {
   if (vez.papel === "NINGUEM") return vez.acaoEsperada;
 
   const quem: Record<Exclude<PapelDaVez, "NINGUEM">, string> = {
     ADMINISTRADOR: "o Administrador Municipal",
     GABINETE: "o Gabinete do Administrador",
     SECRETARIA_GERAL: "a Secretaria Geral",
-    CHEFIA_DIRECCAO: nomes.direcao ? `a chefia da ${nomes.direcao}` : "a chefia da direcção",
+    CHEFIA_DIRECCAO: descreverChefia(nomes.direcaoSigla, nomes.direcao),
     RESPONSAVEL: nomes.responsavel ? `${nomes.responsavel}` : "o responsável pelo processo",
   };
   return `Neste momento o processo está com ${quem[vez.papel]}. Próximo passo: ${vez.acaoEsperada}`;
@@ -340,8 +362,8 @@ export function mensagemDaVez(params: {
   const pessoal = params.soUmDestinatario || params.vez.papel === "RESPONSAVEL";
   return {
     titulo: pessoal
-      ? `Processo ${params.numero} - a próxima acção é contigo`
-      : `Processo ${params.numero} - a próxima acção é da tua equipa`,
+      ? `Processo ${params.numero} — a próxima acção é contigo`
+      : `Processo ${params.numero} — a próxima acção é da tua equipa`,
     mensagem:
       `${params.oQueAconteceu} O que falta fazer: ${params.vez.acaoEsperada}` +
       (params.complemento ? ` ${params.complemento}` : ""),

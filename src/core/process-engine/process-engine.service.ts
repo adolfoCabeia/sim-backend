@@ -31,8 +31,9 @@ import {
   SIGLA_SECRETARIA_GERAL,
   carregarContextoExecutor,
   descreverVez,
+  tituloDaChefia,
   determinarVez,
-  ehChefiaDaDireccao,
+  ehDirectorDaDireccao,
   executorTemAVez,
   mensagemDaVez,
   podeSubirDirecto,
@@ -214,7 +215,7 @@ async function verificarAtribuicaoPessoal(
   });
 
   if (responsavelActualId === null) {
-    if (ctx.ehAdministracao || ehChefiaDaDireccao(ctx, processo.direcaoAtualId)) return;
+    if (ctx.ehAdministracao || ehDirectorDaDireccao(ctx, processo.direcaoAtualId)) return;
     await tx.processoGenerico.update({
       where: { id: processoId },
       data: { responsavelActualId: executorId },
@@ -229,7 +230,7 @@ async function verificarAtribuicaoPessoal(
 
   throw new ProcessoNaoAtribuidoAoExecutorError(
     "Este processo está atribuído a outro colega, por isso só ele pode agir agora. " +
-    "Voltará à chefia quando ele subir a resposta."
+    "Voltará à chefia da direcção quando ele enviar a resposta."
   );
 }
 
@@ -721,6 +722,34 @@ export async function notificarAposMovimento(params: {
         destinatarios: daVez,
       });
       juntarEnvios(envios, envio);
+    } else if (vez.papel === "CHEFIA_DIRECCAO") {
+      // A vez é da chefia da direcção, mas a direcção não tem chefia definida (ex.: a Secretaria Geral
+      // no início): o processo ficaria parado sem ninguém saber. Avisa o Administrador.
+      const direcaoSemChefia = vez.direcaoId
+        ? await tx.direcao.findUnique({ where: { id: vez.direcaoId }, select: { nome: true, sigla: true } })
+        : null;
+      const admins = (
+        await resolverDestinatariosDaVez(tx, params.municipioId, {
+          papel: "ADMINISTRADOR",
+          acaoEsperada: "",
+          direcaoId: null,
+          utilizadorId: null,
+        })
+      ).filter((d) => !excluidos.has(d.utilizadorId));
+      if (admins.length > 0) {
+        const titulo = tituloDaChefia(direcaoSemChefia?.sigla);
+        const envio = await notificarAcaoProcesso(tx, {
+          titulo: `Processo ${processo.numero} — falta definir o ${titulo}`,
+          mensagem:
+            `O processo ${processo.numero} está na ${direcaoSemChefia?.nome ?? "direcção"}, mas esta ainda não tem ` +
+            `${titulo} definido, por isso ninguém o pode tratar. Define-o em Direcções.`,
+          tipo: "ACAO_REQUERIDA",
+          processoId: processo.id,
+          numeroProcesso: processo.numero,
+          destinatarios: admins,
+        });
+        juntarEnvios(envios, envio);
+      }
     }
 
     // 2) Internos envolvidos (quem já actuou + responsável actual [+ Administrador])
@@ -749,7 +778,7 @@ export async function notificarAposMovimento(params: {
     if (envolvidos.length > 0) {
       const [direcaoActual, responsavel] = await Promise.all([
         processo.direcaoAtualId
-          ? tx.direcao.findUnique({ where: { id: processo.direcaoAtualId }, select: { nome: true } })
+          ? tx.direcao.findUnique({ where: { id: processo.direcaoAtualId }, select: { nome: true, sigla: true } })
           : null,
         processo.responsavelActualId
           ? tx.utilizador.findUnique({ where: { id: processo.responsavelActualId }, select: { nomeCompleto: true } })
@@ -759,7 +788,11 @@ export async function notificarAposMovimento(params: {
         titulo: `Processo ${processo.numero} — novidade`,
         mensagem:
           `${oQueAconteceu} ` +
-          descreverVez(vez, { direcao: direcaoActual?.nome ?? null, responsavel: responsavel?.nomeCompleto ?? null }),
+          descreverVez(vez, {
+            direcao: direcaoActual?.nome ?? null,
+            direcaoSigla: direcaoActual?.sigla ?? null,
+            responsavel: responsavel?.nomeCompleto ?? null,
+          }),
         tipo: "PROCESSO_ATUALIZADO",
         processoId: processo.id,
         numeroProcesso: processo.numero,
@@ -981,7 +1014,7 @@ export async function expedirParaDireccao(params: { municipioId: string; process
 
 /**
  * Subida da resposta.
- *  - Director da direcção (ou Administração): sobe directo, sem passo de "receber resposta da
+ *  - Chefia da direcção que está a tratar o processo (e só ela): sobe directo, sem passo de "receber resposta da
  *    direcção". `viaExpediente` mantém-se no contrato: true = à SG, false = ao GAM.
  *  - Funcionário: deixa a resposta pronta (RESPOSTA_A_SUBIR) e a chefia da direcção sobe-a.
  */
@@ -1464,11 +1497,22 @@ export async function obterTimelineCidadao(params: { municipioId: string; proces
       select: SELECT_PROCESSO_GENERICO_PUBLICO,
     });
 
-    const documentosSaida = await tx.processoGenericoAnexo.findMany({
+    const todosOsSaida = await tx.processoGenericoAnexo.findMany({
       where: { processoId: processo.id, tipoAnexo: "SAIDA" },
       orderBy: { criadoEm: "asc" },
-      select: { id: true, nomeFicheiro: true, versao: true, criadoEm: true },
+      select: { id: true, nomeFicheiro: true, versao: true, criadoEm: true, assinadoEm: true },
     });
+
+    // Só a versão mais recente de cada documento (as anteriores foram rascunhos).
+    const maisRecentePorNome = new Map<string, (typeof todosOsSaida)[number]>();
+    for (const a of todosOsSaida) {
+      const actual = maisRecentePorNome.get(a.nomeFicheiro);
+      if (!actual || a.versao > actual.versao) maisRecentePorNome.set(a.nomeFicheiro, a);
+    }
+    const documentosSaida = [...maisRecentePorNome.values()].map(({ assinadoEm, ...doc }) => ({
+      ...doc,
+      assinado: assinadoEm !== null,
+    }));
 
     return { ...processoPublico, timeline: transicoes, documentosSaida };
   });
@@ -1502,6 +1546,7 @@ export async function obterAnexoSaidaCidadao(params: {
         processoId: true,
         nomeFicheiro: true,
         storageKey: true,
+        storageKeyAssinado: true,
         tipoAnexo: true,
         versao: true,
         criadoEm: true,
@@ -1512,7 +1557,9 @@ export async function obterAnexoSaidaCidadao(params: {
       throw new AnexoNaoEncontradoError("Documento não encontrado.");
     }
 
-    return anexo;
+    // Se o documento foi assinado, o cidadão recebe a cópia com as assinaturas e o QR de verificação.
+    const { storageKeyAssinado, ...resto } = anexo;
+    return { ...resto, storageKey: storageKeyAssinado ?? anexo.storageKey };
   });
 }
 
@@ -1595,6 +1642,11 @@ export async function adicionarAnexo(params: {
     const tipoAnexo = params.tipoAnexo ?? "ENTRADA";
 
     if (tipoAnexo === "SAIDA") {
+      if (!params.nomeFicheiro.toLowerCase().endsWith(".pdf")) {
+        throw new DocumentoSaidaForaDeContextoError(
+          "O documento de saída tem de ser um PDF: é sobre ele que se aplicam as assinaturas e o código QR de verificação."
+        );
+      }
       if (!params.origemInterna) {
         throw new AnexoNaoAutorizadoError(
           "Só uma conta INTERNO (funcionário) pode anexar o documento de saída — o requerente só pode anexar documentos de entrada."
@@ -1838,16 +1890,16 @@ async function construirRestricaoAguardaAccao(
     { responsavelActualId: utilizadorAlvoId, localizacaoActual: { in: locsDeTrabalho }, ...semDecisaoFinalPendente },
   ];
 
-  if (ctx.ehChefia && ctx.direcaoId) {
+  if (ctx.ehDirector && ctx.direcaoId) {
     condicoes.push(
-      // Chefia: processos da minha direcção ainda sem responsável
+      // Director: processos da minha direcção ainda sem responsável
       {
         direcaoAtualId: ctx.direcaoId,
         responsavelActualId: null,
         localizacaoActual: { in: locsDeTrabalho },
         ...semDecisaoFinalPendente,
       },
-      // Chefia: respostas de funcionários à espera de serem subidas
+      // Director: respostas de funcionários à espera de serem subidas
       { direcaoAtualId: ctx.direcaoId, localizacaoActual: L.RESPOSTA_A_SUBIR }
     );
   }

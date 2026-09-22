@@ -14,6 +14,35 @@ const programaObject = {
   },
 };
 
+// Participante devolvido no detalhe. additionalProperties evita que o serializador
+// descarte campos do service que não estejam listados aqui (ex.: beneficiario).
+const participanteObject = {
+  type: "object",
+  additionalProperties: true,
+  properties: {
+    id: { type: "string", format: "uuid" },
+    beneficiarioId: { type: "string", format: "uuid" },
+    observacoes: { type: "string", nullable: true },
+    beneficiario: {
+      type: "object",
+      nullable: true,
+      additionalProperties: true,
+      properties: {
+        nome: { type: "string" },
+        bairro: { type: "string", nullable: true },
+      },
+    },
+  },
+};
+
+const programaDetalheObject = {
+  ...programaObject,
+  properties: {
+    ...programaObject.properties,
+    participantes: { type: "array", items: participanteObject },
+  },
+};
+
 const errorResponse = (description: string) => ({
   type: "object",
   description,
@@ -48,7 +77,7 @@ export const obterProgramaDocs = {
     security: [{ bearerAuth: [] }],
     params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
     response: {
-      200: { type: "object", properties: { success: { type: "boolean" }, data: programaObject } },
+      200: { type: "object", properties: { success: { type: "boolean" }, data: programaDetalheObject } },
       404: errorResponse("Programa não encontrado"),
     },
   },
